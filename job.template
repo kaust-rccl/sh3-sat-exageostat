@@ -1,5 +1,8 @@
 #!/bin/bash --login
 
+## Bilel asked to test this variable
+# export FI_MR_CACHE_MONITOR=disabled
+
 function pxq {
   nodes=$1
   ppn=$2
@@ -89,14 +92,14 @@ mask=0xffffffffffffffffffffffffffffffffffffffffffffffff
 
 interleave=on
 case $interleave in
-on) driver2="numactl --interleave=all";driver2="../interleave.sh";;
+on) driver2="numactl --interleave=all";driver2="../../interleave.sh";;
 off) driver2= ;;
 esac
 
-export LD_LIBRARY_PATH=../exageostat_parsec/build/install_dir/lib:../exageostat_parsec/dplasma/build/install_dir/lib64:../exageostat_parsec/dplasma/build/install_dir/lib:../codes/nlopt-2.4.2/nlopt_install/lib:../exageostat_parsec/hicma/chameleon/build/install_dir/lib:../codes/starpu-1.2.9/starpu_install/lib:../codes/gsl-2.4/gsl_install/lib:$LD_LIBRARY_PATH
-ldd ../exageostat_parsec/build/exageostat_exact/parsec/testing_hsdpotrf
+export LD_LIBRARY_PATH=../../exageostat_parsec/build/install_dir/lib:../../exageostat_parsec/dplasma/build/install_dir/lib64:../../exageostat_parsec/dplasma/build/install_dir/lib:../../codes/nlopt-2.4.2/nlopt_install/lib:../../exageostat_parsec/hicma/chameleon/build/install_dir/lib:../../codes/starpu-1.2.9/starpu_install/lib:../../codes/gsl-2.4/gsl_install/lib:$LD_LIBRARY_PATH
+ldd ../../exageostat_parsec/build/exageostat_exact/parsec/testing_hsdpotrf
 echo "Run started at" $(date)
-srun -n $NTASKS -N $NNODES --ntasks-per-node $PPN --cpus-per-task $CPUS_PER_TASK --cpu-bind=mask_cpu:${mask} ${driver2} ../exageostat_parsec/build/exageostat_exact/parsec/testing_hsdpotrf --test --N=$n --dts=$mb --ncores=$((cpru-depop)) --computation=exact --kernel=3:0.083849:0.6  --ikernel=3:0.083849:0.6 --olb=0.01:0.01:0.01 --oub=5:5:2 --zvecs=$zvecs     --predict=0 --c_fun=pow-exp --precision=2 --dim=2d    --band_size_double=$band_size_double --band_size_single=$band_size_single    --sendless=$send_less --tensor_gemm=1 --verbose --p=$P --opt_tol=7 -- --mca mca_sched ${PARSEC_SCHED:-ll} #--mca mca_comm_thread_yield 0 --mca mca_comm_verbose 100 --mca mca_debug_verbose 100 #--predict=$((n/10)) #--parsec_dot this.dot #--mca sched_verbose 40 
+srun -n $NTASKS -N $NNODES --ntasks-per-node $PPN --cpus-per-task $CPUS_PER_TASK --cpu-bind=mask_cpu:${mask} ${driver2} ../../exageostat_parsec/build/exageostat_exact/parsec/testing_hsdpotrf --test --N=$n --dts=$mb --ncores=$((cpru-depop)) --computation=exact --kernel=3:0.083849:0.6  --ikernel=3:0.083849:0.6 --olb=0.01:0.01:0.01 --oub=5:5:2 --zvecs=$zvecs     --predict=0 --c_fun=pow-exp --precision=2 --dim=2d    --band_size_double=$band_size_double --band_size_single=$band_size_single    --sendless=$send_less --tensor_gemm=1 --verbose --p=$P --opt_tol=7 -- --mca mca_sched ${PARSEC_SCHED:-ll} #--mca mca_comm_thread_yield 0 --mca mca_comm_verbose 100 --mca mca_debug_verbose 100 #--predict=$((n/10)) #--parsec_dot this.dot #--mca sched_verbose 40 
 echo "Run completed at" $(date)
 
 perf=$(awk '{print $6}' results.txt)
