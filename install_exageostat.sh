@@ -19,6 +19,7 @@ gnu|gnu-mkl)
   module load mkl
   ;;
 cray-mkl)
+  module load cpe/23.12
   module load gcc
   module unload cray-libsci
   #module load mkl
