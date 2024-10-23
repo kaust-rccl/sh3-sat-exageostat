@@ -1,0 +1,104 @@
+#+TITLE: README for developers
+#+LANGUAGE:  en
+#+OPTIONS: H:3 num:t \n:nil @:t ::t |:t _:nil ^:nil -:t f:t *:t <:t
+#+OPTIONS: TeX:t LaTeX:t skip:nil d:nil pri:nil tags:not-in-toc html-style:nil
+
+This page is dedicated to rules and conventions that Chameleon's
+developers must follow and that should be read by contributors.
+
+* Gitlab flow: how to contribute to Chameleon
+
+  Please read and follow guidelines given in the [[file:CONTRIBUTING.org][CONTRIBUTING file]].
+
+** Update submodules
+
+   Chameleon git project depends on a "submodule" git, located in
+   cmake_modules/morse_cmake and hosted here
+   https://gitlab.inria.fr/solverstack/morse_cmake.
+
+   To update this submodule to the last development state, follow
+   these steps:
+
+   #+begin_src sh
+   git submodule update --remote cmake_modules/morse_cmake
+   git commit cmake_modules/morse_cmake -m "update morse_cmake submodule"
+   git push --recurse-submodules=check
+   #+end_src
+
+* Documentation
+  <<sec:doc>>
+** Generate the documentation
+*** Prerequisites
+
+     To generate the documentation you need to have [[http://www.stack.nl/~dimitri/doxygen/][Doxygen]] and
+     [[https://orgmode.org/][org-mode]] installed on your system.
+
+     For example, on Debian systems:
+     #+begin_src sh
+     sudo apt install doxygen org-mode texlive texlive-latex-extra emacs
+     #+end_src
+
+*** configure + make documentation
+
+    Enter into the Chameleon's source root directory and configure
+    with *CHAMELEON_ENABLE_DOC=ON*, then generate the documentation
+    with ~make doc~
+
+    #+begin_src sh
+    cd chameleon
+    mkdir build && cd build
+    cmake .. -DCHAMELEON_ENABLE_DOC=ON
+    make doc
+    #+end_src
+
+** Rules about source code documentation
+
+   Please refer to this file for the documentation guidelines [[file:doc/doxygen/README.org][README]].
+
+* Naming and writting conventions
+
+  Chameleon library started as an extension of the PLASMA library so
+  that code naming and writting conventions should follow [[https://bitbucket.org/icl/plasma][PLASMA]] ones.
+
+* Packaging
+
+   A Chameleon's release is a source package, of the form
+   chameleon-major.minor.patch.tar.gz, which:
+   1) has been properly tested,
+   2) contains a generated documentation corresponding to the released version,
+   3) has an up-to-date ChangeLog file,
+   4) is published on internet.
+
+** Test Chameleon before packaging
+
+   TODO - Write the way we could systematically test Chameleon before
+   packaging, for example writting a script (generated from this
+   org-mode file) to be used on PlaFRIM plus some specific ctest
+   tests.
+
+** Source tarball generation
+
+   This step requires to generate the [[sec:doc][documentation]].
+
+   #+begin_src sh
+   export CHAMELEON_ROOT=/path/to/chameleon/sources/to/be/released
+   cmake $CHAMELEON_ROOT -DCHAMELEON_ENABLE_DOC=ON
+   make doc
+   cp doc/orgmode/users_guide.pdf $CHAMELEON_ROOT
+   make package_source
+   #+end_src
+
+   A tarball chameleon-major.minor.patch.tar.gz should be generated
+   and contains the users_guide documentation.
+
+** Publish the release on internet
+
+   A git tag must be first created, for example
+   #+begin_src sh
+   git tag -a v1.0.0 -m 'Version 1.0.0'
+   git push --tags
+   #+end_src
+
+   Then in the Chameleon *Tags* tab,
+   https://gitlab.inria.fr/solverstack/chameleon/tags, edit the
+   release notes and attach the tarball previously generated.

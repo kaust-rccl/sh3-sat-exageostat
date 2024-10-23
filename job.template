@@ -1,0 +1,110 @@
+#!/bin/bash --login
+
+function pxq {
+  nodes=$1
+  ppn=$2
+  ranks=$((nodes*ppn))
+  p=$ppn
+  while [ $((p*p)) -lt $ranks ]; do
+    ((p=p*2))
+  done
+  [ $((p*p)) -gt $ranks ] && ((p=p/2))
+  echo $p
+}
+
+source ~/job_header
+source ~/job_sanity_check
+source ~/job_init_state
+source ~/job_tune_mpi EXAGEOSTAT_CPU_8
+
+set -x
+
+n=__MATRIX__
+mb=__TILE__
+NNODES=__NODES__
+PPN=__NTASKS_PER_NODE__
+NTASKS=__NTASKS__
+CPUS_PER_TASK=__CPUS_PER_TASK__
+depop=__DEPOP__
+
+# 2. Application's run once
+mkdir -p runs/${SLURM_JOB_ID} && cd runs/${SLURM_JOB_ID}
+
+# 2. Run the application
+module unload cray-libsci
+module load gcc
+export MKLROOT=/scratch/hpe/fthomas/css/.local/mkl/2019.5
+module list
+
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$MKLROOT/lib
+mkl=2019
+case $mkl in
+2019)
+  export MKL_DEBUG_CPU_TYPE=5
+  export MKL_ENABLE_INSTRUCTIONS=AVX512
+  export MKL_ENABLE_INSTRUCTIONS=AVX2
+  ;;
+2023)
+  export LD_LIBRARY_PATH=/sw/intel/oneapi/mkl/2023.1.0/lib/intel64:$LD_LIBRARY_PATH
+  export MKL_DEBUG_CPU_TYPE=7
+  export MKL_ENABLE_INSTRUCTIONS=AVX512
+  ;;
+esac
+
+case $n in
+14K) n=14400;;
+56K) n=57600;;
+100K) n=102400;;
+128K) n=129600;;
+230K) n=230400;;
+300K) n=300304;;
+400K) n=409600;;
+640K) n=640000;;
+1.1M) n=1100401;;
+1.5M) n=1500625;;
+3.0M) n=2999824;;
+3.4M) n=3441025;;
+4.7M) n=4734976;;
+5.6M) n=5664400;;
+6.8M) n=6864400;;
+*) echo "$n unknown m. Exiting.";exit 1;;
+esac
+
+band_size_single=90
+band_size_double=10
+zvecs=1
+send_less=0
+
+case $mb in
+300|320|400|440|480|520|560|600|640|960|1280|1920) : ;;
+*) echo "$mb unusual mb. Why not?";;
+esac
+
+P=$(pxq $NNODES $PPN)
+#P=$((P/2))
+
+export OMP_NUM_THREADS=1
+cpru=$((192/PPN))
+mask=0xffffffffffffffffffffffffffffffffffffffffffffffff
+
+interleave=on
+case $interleave in
+on) driver2="numactl --interleave=all";driver2="../interleave.sh";;
+off) driver2= ;;
+esac
+
+export LD_LIBRARY_PATH=../exageostat_parsec/build/install_dir/lib:../exageostat_parsec/dplasma/build/install_dir/lib64:../exageostat_parsec/dplasma/build/install_dir/lib:../codes/nlopt-2.4.2/nlopt_install/lib:../exageostat_parsec/hicma/chameleon/build/install_dir/lib:../codes/starpu-1.2.9/starpu_install/lib:../codes/gsl-2.4/gsl_install/lib:$LD_LIBRARY_PATH
+ldd ../exageostat_parsec/build/exageostat_exact/parsec/testing_hsdpotrf
+echo "Run started at" $(date)
+srun -n $NTASKS -N $NNODES --ntasks-per-node $PPN --cpus-per-task $CPUS_PER_TASK --cpu-bind=mask_cpu:${mask} ${driver2} ../exageostat_parsec/build/exageostat_exact/parsec/testing_hsdpotrf --test --N=$n --dts=$mb --ncores=$((cpru-depop)) --computation=exact --kernel=3:0.083849:0.6  --ikernel=3:0.083849:0.6 --olb=0.01:0.01:0.01 --oub=5:5:2 --zvecs=$zvecs     --predict=0 --c_fun=pow-exp --precision=2 --dim=2d    --band_size_double=$band_size_double --band_size_single=$band_size_single    --sendless=$send_less --tensor_gemm=1 --verbose --p=$P --opt_tol=7 -- --mca mca_sched ${PARSEC_SCHED:-ll} #--mca mca_comm_thread_yield 0 --mca mca_comm_verbose 100 --mca mca_debug_verbose 100 #--predict=$((n/10)) #--parsec_dot this.dot #--mca sched_verbose 40 
+echo "Run completed at" $(date)
+
+perf=$(awk '{print $6}' results.txt)
+echo perf=$perf
+perf=$(bc -l <<< "$perf/1000.")
+#perf=$(grep "Gflop/s" $output | sed "s?\(.*\)Gflop/s:??" | awk '{print $1}')
+source ~/job_footer
+source ~/job_check_dmesg
+source ~/job_restore_state
+source ~/job_update_db
+

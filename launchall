@@ -1,0 +1,29 @@
+#!/bin/bash
+
+matrix=(              300K    300K    1.1M  1.5M  3.4M  5.6M  )
+tile=(                 320     480     560   960   960   960  )
+nodes=(               1024    1024    1024  4096  4096  4096  )
+ntasks=(              1024    1024    1024  4096  4096  4096  )
+depop=(                 24      24      24    12     1     1  )
+ntasks_per_node=(        1       1       1     1     1     1  )
+cpus_per_task=(        384     384     384   384   384   384  )
+
+tests=(0 1 2 )
+
+num_tests=${#tests[@]}
+num_tests=$((num_tests - 1))
+for j in $(seq 0 $num_tests);do
+  i=${tests[$j]}
+  sed -e "s/__MATRIX__/${matrix[$i]}/" \
+      -e "s/__TILE__/${tile[$i]}/" \
+      -e "s/__NODES__/${nodes[$i]}/" \
+      -e "s/__NTASKS__/${ntasks[$i]}/" \
+      -e "s/__DEPOP__/${depop[$i]}/" \
+      -e "s/__NTASKS_PER_NODE__/${ntasks_per_node[$i]}/" \
+      -e "s/__CPUS_PER_TASK__/${cpus_per_task[$i]}/" \
+      job.template > job.slurm
+  n1=${nodes[$i]}
+  ppn=${ntasks_per_node[$i]}
+  ((mpi=n1*ppn))
+  echo sbatch --job-name ExaGeoStat --time 12:00:00 --nodes ${nodes[$i]} --ntasks $mpi --ntasks-per-node ${ntasks_per_node[$i]} --cpus-per-task ${cpus_per_task[$i]} --hint=multithread job.slurm
+done

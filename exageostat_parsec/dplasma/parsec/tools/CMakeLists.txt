@@ -1,0 +1,8 @@
+Add_Subdirectory(profiling)
+
+if(BUILD_TOOLS)
+  install(FILES parsec-dotmerger DESTINATION ${PARSEC_INSTALL_BINDIR} PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
+endif(BUILD_TOOLS)
+
+add_subdirectory(aggregator_visu)
+

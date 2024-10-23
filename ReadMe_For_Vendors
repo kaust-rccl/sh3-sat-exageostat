@@ -1,0 +1,21 @@
+CPU-only Installation
+=====================
+1- Source ./install_exageostat.sh
+2- An env-file will be created inside "codes" directory under the name "pkg_config.sh" which should be sourced every new session.
+
+
+Jobs scripts
+============
+1- ExaGeoStat depends on tile-based linear algebra algorithms that require tuning the "tile size" in different hardware architectures. Thus,
+job-tune.sh should be run first to tune the "tile size" and be used in the other jobs. To obtain the best tile size, just use "grep -rnw './' -e 'Potrf_DOUBLE' | sort -nrk22"
+with the output file and select the NB with the best flops.
+
+2- We prepared 6 bash files to run 18 different jobs:
+        a- We would like to try two tile sizes, a small one and a large one, to have different communication loads on the system. We gave an example of 320 and 960. We prefer if one of them
+        is the tuned tile size.
+        b- We have two problem sizes, 300K  and 1.1M, with 1024 nodes. The bash-1024-??-??.sh files should run four jobs simultaneously with the same tile size and matrix size.
+        c- We have one problem size 1.5M with 4096. the bash-4096-??.sh should run the jobs for this.
+
+Results
+=======
+The results can be obtained by just returning the output files.

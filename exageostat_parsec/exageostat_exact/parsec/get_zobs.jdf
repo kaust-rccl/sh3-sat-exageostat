@@ -1,0 +1,103 @@
+extern "C" %{
+/*
+ * Copyright (c) 2017-2018 The Universiy of Tennessee and The Universiy
+ *                         of Tennessee Research Foundation. All rights
+ *                         reserved.
+ */
+
+#include "mix_precision_internal.h"
+
+%}
+
+descA          [ type = "parsec_tiled_matrix_dc_t *" ]
+Z              [ type = "double *" ]
+N              [ type = "int" ]
+
+Read(m, n)
+
+m = 0 .. descA->lmt-1
+n = 0 .. 0 
+
+: descA(m, n)
+
+READ A <- descA(m, n) 
+       -> A Gather(m, n)
+
+BODY
+{
+}
+END
+
+Gather(m, n)
+
+m = 0 .. descA->lmt-1
+n = 0 .. 0
+
+: descA(0, 0)
+
+READ A <- A Read(m, n) 
+
+BODY
+{
+       void *Z0 = (void *)Z + m * descA->mb * sizeof(double); 
+       int size = (m == descA->lmt-1)? (N - (descA->lmt-1) * descA->mb) * sizeof(double) : descA->mb * sizeof(double);
+       memcpy( Z0, A, size ); 
+}
+END
+
+
+extern "C" %{
+
+/**
+ * @param [in] dcA:    the data, already distributed and allocated
+ * @return the parsec object to schedule.
+ */
+parsec_taskpool_t*
+parsec_get_zobs_New(parsec_tiled_matrix_dc_t *dcA, double *Z, int N) 
+{
+    parsec_taskpool_t* get_zobs_taskpool;
+    parsec_get_zobs_taskpool_t* taskpool = NULL;
+
+    taskpool = parsec_get_zobs_new(dcA, Z, N); 
+    get_zobs_taskpool = (parsec_taskpool_t*)taskpool;
+
+    parsec_matrix_add2arena(taskpool->arenas[PARSEC_get_zobs_DEFAULT_ARENA],
+                            parsec_datatype_double_t, matrix_UpperLower,
+                            1, dcA->mb, 1, dcA->mb,
+                            PARSEC_ARENA_ALIGNMENT_SSE, -1 );
+
+    return get_zobs_taskpool;
+}
+
+/**
+ * @param [inout] the parsec object to destroy
+*/
+void parsec_get_zobs_Destruct(parsec_taskpool_t *taskpool)
+{
+    parsec_get_zobs_taskpool_t *get_zobs_taskpool = (parsec_get_zobs_taskpool_t *)taskpool;
+    parsec_matrix_del2arena(get_zobs_taskpool->arenas[PARSEC_get_zobs_DEFAULT_ARENA]);
+    parsec_taskpool_free(taskpool);
+}
+
+/**
+ * @brief allocate and generate dcA
+ * 
+ * @param [inout] dcA: the data, already distributed and allocated
+ */
+int parsec_get_zobs(parsec_context_t *parsec,
+		parsec_tiled_matrix_dc_t *dcA, double *Z, int N) 
+{
+    parsec_taskpool_t *parsec_get_zobs = NULL;
+    parsec_get_zobs = parsec_get_zobs_New(dcA, Z, N); 
+
+    if( parsec_get_zobs != NULL ){
+        parsec_context_add_taskpool(parsec, parsec_get_zobs);
+        parsec_context_start(parsec);
+        parsec_context_wait(parsec);
+        parsec_get_zobs_Destruct(parsec_get_zobs);
+    }
+
+    return 0;
+}
+
+%}

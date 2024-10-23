@@ -1,0 +1,301 @@
+image: hpclib/hiepacs
+
+stages:
+  - build
+  - test
+  - third
+
+before_script:
+  - git submodule update --init --recursive
+  - source .gitlab-ci-env.sh $SIMU
+  - mkdir -p build
+
+.build_script_template: &build_script
+  stage: build
+  script:
+    - echo BUILD_OPTIONS $BUILD_OPTIONS
+    - echo VERSION $VERSION
+    - (cd build &&
+       scan-build -plist --intercept-first --analyze-headers -o analyzer_reports
+       cmake -C ../cmake_modules/gitlab-ci-initial-cache.cmake .. $BUILD_OPTIONS &&
+       scan-build -plist --intercept-first --analyze-headers -o analyzer_reports
+       ctest --no-compress-output -V -j 5
+             -D ExperimentalBuild
+             -D ExperimentalSubmit
+             | tee ../chameleon_${VERSION}.log)
+    - (cd build &&
+       make install | tee -a ../chameleon_${VERSION}.log &&
+       rm install/ -r)
+
+.test_script_template: &test_script
+  stage: test
+  script:
+    - echo TESTS_RESTRICTION $TESTS_RESTRICTION
+    - echo VERSION $VERSION
+    - (cd build &&
+       eval "ctest --no-compress-output -V
+             $TESTS_RESTRICTION
+             -D ExperimentalTest
+             -D ExperimentalCoverage
+             -D ExperimentalSubmit
+             | tee -a ../chameleon_${VERSION}.log")
+    - lcov --directory build --capture --output-file ./chameleon_${VERSION}.lcov
+
+build_starpu:
+  <<: *build_script
+  artifacts:
+    name: build_starpu
+    expire_in: 48 hours
+    paths:
+      - build
+      - chameleon_starpu.log
+  variables:
+    BUILD_OPTIONS: "-DCHAMELEON_USE_CUDA=ON -DCHAMELEON_USE_MPI=ON"
+    VERSION: starpu
+
+build_starpu_simgrid:
+  <<: *build_script
+  artifacts:
+    name: build_starpu_simgrid
+    expire_in: 48 hours
+    paths:
+      - build
+      - chameleon_starpu_simgrid.log
+  variables:
+    SIMU: simu
+    BUILD_OPTIONS: "-DCHAMELEON_SIMULATION=ON -DCHAMELEON_USE_CUDA=ON -DCHAMELEON_USE_MPI=OFF"
+    VERSION: starpu_simgrid
+
+build_quark:
+  <<: *build_script
+  artifacts:
+    name: build_quark
+    expire_in: 48 hours
+    paths:
+      - build
+      - chameleon_quark.log
+  variables:
+    BUILD_OPTIONS: "-DCHAMELEON_SCHED_QUARK=ON"
+    VERSION: quark
+
+build_parsec:
+  <<: *build_script
+  artifacts:
+    name: build_parsec
+    expire_in: 48 hours
+    paths:
+      - build
+      - chameleon_parsec.log
+  variables:
+    BUILD_OPTIONS: "-DCHAMELEON_SCHED_PARSEC=ON"
+    VERSION: parsec
+
+test_starpu_branches:
+  <<: *test_script
+  variables:
+    TESTS_RESTRICTION: "-R \"test_shm_s|test_mpi_s\""
+    VERSION: starpu
+  dependencies:
+    - build_starpu
+  artifacts:
+    name: test_starpu
+    expire_in: 48 hours
+    paths:
+      - build
+      - chameleon_starpu.log
+      - chameleon_starpu.lcov
+  only:
+    - branches
+  except:
+    - master
+
+test_starpu_master:
+  <<: *test_script
+  variables:
+    TESTS_RESTRICTION: "-R \"test_shm_|test_mpi_\""
+    VERSION: starpu
+  dependencies:
+    - build_starpu
+  artifacts:
+    name: test_starpu
+    expire_in: 48 hours
+    paths:
+      - build
+      - chameleon_starpu.log
+      - chameleon_starpu.lcov
+  only:
+    - master@solverstack/chameleon
+
+test_starpu_simgrid_branches:
+  <<: *test_script
+  variables:
+    TESTS_RESTRICTION: "-R simu"
+    VERSION: starpu_simgrid
+  dependencies:
+    - build_starpu_simgrid
+  artifacts:
+    name: test_starpu_simgrid
+    expire_in: 48 hours
+    paths:
+      - build
+      - chameleon_starpu_simgrid.log
+      - chameleon_starpu_simgrid.lcov
+  only:
+    - branches
+  except:
+    - master
+
+test_starpu_simgrid_master:
+  <<: *test_script
+  variables:
+    TESTS_RESTRICTION: "-R simu"
+    VERSION: starpu_simgrid
+  dependencies:
+    - build_starpu_simgrid
+  artifacts:
+    name: test_starpu_simgrid
+    expire_in: 48 hours
+    paths:
+      - build
+      - chameleon_starpu_simgrid.log
+      - chameleon_starpu_simgrid.lcov
+  only:
+    - master@solverstack/chameleon
+
+test_quark_branches:
+  <<: *test_script
+  variables:
+    TESTS_RESTRICTION: "-R \"test_shm_s|test_mpi_s\""
+    VERSION: quark
+  dependencies:
+    - build_quark
+  artifacts:
+    name: test_quark
+    expire_in: 48 hours
+    paths:
+      - build
+      - chameleon_quark.log
+      - chameleon_quark.lcov
+  only:
+    - branches
+  except:
+    - master
+
+test_quark_master:
+  <<: *test_script
+  variables:
+    TESTS_RESTRICTION: "-R \"test_shm_|test_mpi_\""
+    VERSION: quark
+  dependencies:
+    - build_quark
+  artifacts:
+    name: test_quark
+    expire_in: 48 hours
+    paths:
+      - build
+      - chameleon_quark.log
+      - chameleon_quark.lcov
+  only:
+    - master@solverstack/chameleon
+
+test_parsec_branches:
+  <<: *test_script
+  variables:
+    TESTS_RESTRICTION: "-R \"test_shm_s|test_mpi_s\""
+    VERSION: parsec
+  dependencies:
+    - build_parsec
+  artifacts:
+    name: test_parsec
+    expire_in: 48 hours
+    paths:
+      - build
+      - chameleon_parsec.log
+      - chameleon_parsec.lcov
+  only:
+    - branches
+  except:
+    - master
+
+test_parsec_master:
+  <<: *test_script
+  variables:
+    TESTS_RESTRICTION: "-R \"test_shm_|test_mpi_\""
+    VERSION: parsec
+  dependencies:
+    - build_parsec
+  artifacts:
+    name: test_parsec
+    expire_in: 48 hours
+    paths:
+      - build
+      - chameleon_parsec.log
+      - chameleon_parsec.lcov
+  only:
+    - master@solverstack/chameleon
+
+coverity:
+  stage: third
+  dependencies: []
+  artifacts:
+    name: chameleon_coverity
+    expire_in: 1 week
+    paths:
+      - chameleon.tgz
+  script:
+    - (cd build &&
+       cmake -C ../cmake_modules/gitlab-ci-initial-cache.cmake .. -DCHAMELEON_USE_CUDA=ON -DCHAMELEON_USE_MPI=ON &&
+       cov-build --dir ../cov-int make -j 4)
+    - tar czvf chameleon.tgz cov-int
+    - curl --form token=$COVERITY_TOKEN
+           --form email=florent.pruvost@inria.fr
+           --form file=@chameleon.tgz
+           --form version="`git rev-parse --short HEAD`"
+           --form description=""
+           https://scan.coverity.com/builds?project=Chameleon
+  only:
+    - master@solverstack/chameleon
+
+sonarqube:
+  stage: third
+  dependencies:
+    - test_starpu_master
+    - test_starpu_simgrid_master
+    - test_quark_master
+    - test_parsec_master
+  artifacts:
+    name: chameleon_analysis
+    expire_in: 1 week
+    paths:
+      - chameleon_build.log
+      - chameleon_coverage.xml
+      - chameleon_cppcheck.xml
+      - chameleon_rats.xml
+      - sonar.log
+  script:
+    - cat *.log > chameleon_build.log
+    - lcov -a $PWD/chameleon_starpu.lcov
+           -a $PWD/chameleon_starpu_simgrid.lcov
+           -a $PWD/chameleon_quark.lcov
+           -a $PWD/chameleon_parsec.lcov
+           -o $PWD/chameleon.lcov
+    - lcov_cobertura.py chameleon.lcov --output chameleon_coverage.xml
+    - ./tools/analysis.sh
+  only:
+    - master@solverstack/chameleon
+
+doc:
+  stage: third
+  dependencies: []
+  artifacts:
+    name: chameleon_doc
+    expire_in: 1 week
+    paths:
+      - build/doc/doxygen
+      - build/doc/orgmode
+  script:
+    - cd build
+    - cmake .. -DCHAMELEON_ENABLE_DOC=ON
+    - make doc -j5
+  only:
+    - master@solverstack/chameleon

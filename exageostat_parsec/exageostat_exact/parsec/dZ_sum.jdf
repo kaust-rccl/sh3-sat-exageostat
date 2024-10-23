@@ -1,0 +1,137 @@
+extern "C" %{
+/*
+ * Copyright (c) 2017-2018 The Universiy of Tennessee and The Universiy
+ *                         of Tennessee Research Foundation. All rights
+ *                         reserved.
+ */
+
+#include "mix_precision_internal.h"
+
+static double parsec_matrix_sum_CORE (double *A, int m, int n, int lda) {
+        double res = 0.0;
+	for (int j = 0; j < n; j++) {
+		for (int i = 0; i < m; i++) {
+                        res += A[j*lda+i]; 
+		}
+	}
+
+	return res;
+}
+
+%}
+
+descA            [ type = "parsec_tiled_matrix_dc_t *" ]
+sum              [ type = "double *" ]
+
+Read(m, n)
+
+m = 0 .. descA->lmt-1
+n = 0 .. 0 
+
+: descA(m, n)
+
+READ A <- descA(m, n)            [ type = DB ]
+
+WRITE D <- NEW
+        -> D Sum(m, n)
+
+BODY
+{
+	int tempmm = (m == descA->lmt-1) ? parsec_imin(descA->mb, descA->m-m*descA->mb): descA->mb;
+	int tempnn = 1; 
+        *((double *)D) = parsec_matrix_sum_CORE( A, tempmm, tempnn, descA->mb );
+}
+END
+
+Sum(m, n)
+
+m = 0 .. descA->lmt-1
+n = 0 .. 0 
+
+: descA(0, 0)
+
+READ D <- D Read(m, n) 
+
+BODY
+{
+	int tid = es->th_id;
+	sum[tid] += *((double *)D); 
+}
+END
+
+
+extern "C" %{
+
+/**
+ * @param [in] dcA:    the data, already distributed and allocated
+ * @return the parsec object to schedule.
+ */
+parsec_taskpool_t*
+parsec_dZ_sum_New(parsec_tiled_matrix_dc_t *dcA, double *sum) 
+{
+    parsec_taskpool_t* dZ_sum_taskpool;
+    parsec_dZ_sum_taskpool_t* taskpool = NULL;
+
+    taskpool = parsec_dZ_sum_new(dcA, sum); 
+    dZ_sum_taskpool = (parsec_taskpool_t*)taskpool;
+
+    parsec_matrix_add2arena(taskpool->arenas[PARSEC_dZ_sum_DEFAULT_ARENA],
+                            parsec_datatype_double_t, matrix_UpperLower,
+                            1, 1, 1, 1,
+                            PARSEC_ARENA_ALIGNMENT_SSE, -1 );
+
+    parsec_matrix_add2arena(taskpool->arenas[PARSEC_dZ_sum_DB_ARENA],
+                            parsec_datatype_double_t, matrix_UpperLower,
+                            1, dcA->mb, dcA->nb, dcA->mb,
+                            PARSEC_ARENA_ALIGNMENT_SSE, -1 );
+
+    return dZ_sum_taskpool;
+}
+
+/**
+ * @param [inout] the parsec object to destroy
+*/
+void parsec_dZ_sum_Destruct(parsec_taskpool_t *taskpool)
+{
+    parsec_dZ_sum_taskpool_t *dZ_sum_taskpool = (parsec_dZ_sum_taskpool_t *)taskpool;
+    parsec_matrix_del2arena(dZ_sum_taskpool->arenas[PARSEC_dZ_sum_DB_ARENA]);
+    parsec_taskpool_free(taskpool);
+}
+
+/**
+ * @brief allocate and generate dcA
+ * 
+ * @param [inout] dcA: the data, already distributed and allocated
+ */
+double parsec_dZ_sum(parsec_context_t *parsec,
+                       parsec_tiled_matrix_dc_t *dcA )
+{
+    parsec_taskpool_t *parsec_dZ_sum = NULL;
+
+    int nb_threads = parsec->virtual_processes[0]->nb_cores;
+    double *sum = (double *)calloc( nb_threads, sizeof(double) );
+
+    parsec_dZ_sum = parsec_dZ_sum_New(dcA, sum); 
+
+    if( parsec_dZ_sum != NULL ){
+        parsec_context_add_taskpool(parsec, parsec_dZ_sum);
+        parsec_context_start(parsec);
+        parsec_context_wait(parsec);
+        parsec_dZ_sum_Destruct(parsec_dZ_sum);
+    }
+
+    double total = 0.0; 
+    int root = dcA->super.rank_of(&dcA->super, 0, 0);
+    if( dcA->super.myrank == root ) {
+        for( int i = 0; i < nb_threads; i++ )
+            total += sum[i];
+    }
+
+    MPI_Bcast( &total, 1, MPI_DOUBLE, root, MPI_COMM_WORLD );
+
+    free( sum );
+
+    return total;
+}
+
+%}

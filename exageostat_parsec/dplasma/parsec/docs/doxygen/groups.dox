@@ -1,0 +1,35 @@
+/**
+ * @defgroup parsec_public Public API
+ *   This is the group with the public API for the PaRSEC Runtime
+ *
+ * @defgroup parsec_internal Internal Documentation
+ * @ingroup parsec
+ *   This is the group with the internal documentation
+ *
+ * @defgroup parsec_internal_binding Binding System
+ * @ingroup parsec_internal
+ *   The PaRSEC binding system allows to bind threads on
+ *   multiple cores with a variety of interfaces for
+ *   portability.
+ *
+ * @defgroup parsec_internal_scheduling Scheduling
+ * @ingroup parsec_internal
+ *    The scheduling group defines all scheduler-related operations
+ *    of the runtime system.
+ *
+ * @defgroup parsec_internal_mempool Memory pools
+ * @ingroup parsec_internal
+ *    Memory pools to improve the performance
+ *    of frequent allocation/de-allocation inside the runtime
+ *    engine
+ *
+ * @defgroup parsec_internal_communication Communication Engine
+ * @ingroup parsec_internal
+ *    Internal Communication Engine of PaRSEC
+ *
+ * @defgroup parsec_internal_classes Basic Classes
+ * @ingroup parsec_internal
+ *    Set of basic data structures to manage lists, hash tables, etc.
+ *
+ **/
+ 

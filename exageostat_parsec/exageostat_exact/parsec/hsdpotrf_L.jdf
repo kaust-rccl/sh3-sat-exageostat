@@ -1,0 +1,859 @@
+extern "C" %{
+/*
+ * Copyright (c) 2010-2020 The University of Tennessee and The University
+ *                         of Tennessee Research Foundation. All rights
+ *                         reserved.
+ */
+#include "mix_precision_internal.h"
+#include "include/dplasmajdf.h"
+
+extern int * potrf_info; /* global info for GPU kernel */
+
+/* Print more info */
+static int print_more = 0;
+static int print_more_gpu = 0;
+
+/* BODY type support recursive */
+#define PARSEC_HAVE_RECURSIVE 1
+
+#if defined(PARSEC_HAVE_RECURSIVE)
+#include "parsec/data_dist/matrix/subtile.h"
+#include "parsec/recursive.h"
+#endif
+
+static inline int my_evaluate_gpu_potrf_convert(int send_less, int band_size_double, int NT, int k) {
+    if( 1 == send_less && k <= NT-1-band_size_double ) {
+        return 1;
+    } else {
+        return 0;
+    }
+}
+
+static inline int my_evaluate_gpu_trsm_convert(int send_less, int band_size_double, int NT, int m, int k) {
+    if( 1 == send_less && m-k < band_size_double && m+band_size_double < NT ) { 
+        return 1;
+    } else {
+        return 0;
+    }
+}
+
+/*
+ * Priorities used in this jdf:
+ *      - potrf_hsdpotrf(k)    : (MT-k)**3
+ *      - potrf_hsdsyrk(k,m)   : (MT-m)**3 + 3 * (m - k)
+ *      - potrf_hsdtrsm(m,k)   : (MT-m)**3 + 3 * (m - k) * (2 * MT - k - m - 1)
+ *      - potrf_hsdgemm(m,n,k) : (MT-m)**3 + 3 * (m - n) * (2 * MT - m - n - 1) + 6 * (m - k)
+ *
+ * So max priority is:
+ *      (MT - PRI_CHANGE)**3 + 3 * MT * (2 * MT - PRI_CHANGE - 1) + 6 * MT  < (MT**3 + 6 MT**2 + 3 MT)
+ *
+ * WARNING: If mt is greater than 1200, we might get integer overflow.
+ */
+
+%}
+
+/* Globals
+ */
+uplo       [type = PLASMA_enum]
+descA      [type = "parsec_tiled_matrix_dc_t*"]
+INFO       [type = "int*"]
+
+PRI_CHANGE [type = "int" hidden = on default = 0 ]
+PRI_MAX    [type = "int" hidden = on default = "(descA->mt * ( 3 + descA->mt * ( 2 + descA->mt )))" ]
+smallnb    [type = "int" hidden = on default = "descA->mb" ]
+
+/* Temporary buffer used for convert */
+p_work_double        [ type = "parsec_memory_pool_t *" hidden = on default = NULL ]
+p_work_single        [ type = "parsec_memory_pool_t *" hidden = on default = NULL ]
+
+/* GPU workspace */
+ws_handle_cusolver   [ type = "void *" hidden = on default = NULL ]
+ws_handle_cublas_tensor     [ type = "void *" hidden = on default = NULL ]
+ws_handle_cublas_gpu        [ type = "void *" hidden = on default = NULL ]
+ws_double1           [ type = "void *" hidden = on default = NULL ]
+ws_double2           [ type = "void *" hidden = on default = NULL ]
+ws_single1           [ type = "void *" hidden = on default = NULL ]
+ws_single2           [ type = "void *" hidden = on default = NULL ]
+ws_half1             [ type = "void *" hidden = on default = NULL ]
+ws_half2             [ type = "void *" hidden = on default = NULL ]
+ws_half3             [ type = "void *" hidden = on default = NULL ]
+
+nb_cuda_devices      [ type = "int"   hidden = on default = 0 ]
+cuda_device_index    [ type = "int *" hidden = on default = "NULL"]
+
+lookahead            [ type = "int"   hidden = on default = 0 ]
+send_less            [ type = "int"   hidden = on default = 0 ]
+band_size_double     [ type = "int"   hidden = on default = 1 ]
+band_size_single     [ type = "int"   hidden = on default = "descA->lmt" ]
+tensor_gemm          [ type = "int"   hidden = on default = 1 ]
+
+/**************************************************
+ *               potrf_bind_A                     *
+ **************************************************/
+potrf_bind_A(m, n)
+
+// Execution space
+m = 0 .. descA->nt-1
+n = 0 .. m 
+
+// Parallel partitioning
+:descA(m, n)
+
+READ A <- descA(m, n)
+       -> (m == 0 && n == 0) ? T potrf_hsdpotrf(0)                    [ type = DOUBLE ]
+       -> (m < band_size_double && n == 0) ? C potrf_hsdtrsm(m, 0)    [ type = DOUBLE ]
+       -> (m >= band_size_double && n == 0) ? C potrf_hsdtrsm(m, 0)   [ type = SINGLE ]
+       -> (m == n && n > 0) ? T potrf_hsdsyrk(0, m)                                 [ type = DOUBLE ]
+       -> (m != n && n > 0 && m-n < band_size_double) ? C potrf_hsdgemm(m, n, 0)    [ type = DOUBLE ]
+       -> (m != n && n > 0 && m-n >= band_size_double) ? C potrf_hsdgemm(m, n, 0)   [ type = SINGLE ]
+
+BODY
+{
+#if defined(EXAGEOSTAT_USE_CUDA)
+    if( nb_cuda_devices > 0 ) {
+        int g = my_gpu_load( m, n, descA->nt, nb_cuda_devices, band_size_double, band_size_single);
+        parsec_advise_data_on_device( _f_A->original,
+                                    cuda_device_index[g],
+                                    PARSEC_DEV_DATA_ADVICE_PREFERRED_DEVICE );
+    }
+#endif
+}
+END
+
+
+/**************************************************
+ *               potrf_hsdpotrf                     *
+ **************************************************/
+potrf_hsdpotrf(k) [high_priority = on] 
+
+// Execution space
+k = 0 .. descA->mt-1
+
+// Parallel partitioning
+:descA(k, k)
+
+// Parameters
+RW T <- (k == 0) ? A potrf_bind_A(k, k) : T potrf_hsdsyrk(k-1, k)                       [ type = DOUBLE ]
+     -> (send_less == 0) ? T potrf_hsdtrsm(k+1..descA->mt-1, k)                         [ type = DOUBLE ]
+     -> (send_less) ? T potrf_hsdtrsm(k+1..k+band_size_double-1, k)                     [ type = DOUBLE ]
+     -> (send_less && k < descA->mt-band_size_double) ? T0 potrf_hsdpotrf_convert(k)    [ type = DOUBLE ] 
+     -> descA(k, k)                                                                     [ type = DOUBLE ]
+
+; (k >= (descA->mt - PRI_CHANGE)) ? (descA->mt - k) * (descA->mt - k) * (descA->mt - k) : PRI_MAX
+
+BODY [type=CUDA weight=k+1]
+{
+#if defined(EXAGEOSTAT_USE_CUDA)
+    if( print_more_gpu ) printf("GPU_potrf %d ; nb_cuda_devices: %d ; cuda_device_index %d\n", k, nb_cuda_devices, gpu_device->cuda_index);
+
+    if( descA->mt/100 && 0 == k % (descA->mt/100) )
+        fprintf(stderr, "In potrf, k %d, %.2lf %% is finished\n", k, 100.0*k/descA->mt);
+
+    int tempkn = k == descA->nt-1 ? descA->n - k*descA->nb : descA->nb;
+    int ldak = descA->mb; 
+    cusolverStatus_t status;
+
+    /* Lookup workspace */
+    parsec_potrf_workspace_t *_ws_handle = (parsec_potrf_workspace_t *)ws_handle_cusolver;
+    parsec_potrf_stream_workspace_t stream_handle = lookup_gpu_workspace(gpu_device, gpu_stream, _ws_handle);
+
+    /* Info used on GPU kernel */
+    cusolverDnHandle_t handle = stream_handle.handle_cusolver;
+    int *dev_info = (int *)(stream_handle.gpu_buffer + stream_handle.buffer_size * sizeof(double));
+    double *gpu_buffer = (double *)stream_handle.gpu_buffer;
+    int buffer_size = stream_handle.buffer_size;
+    assert(NULL != gpu_buffer);
+
+    /* Set stream */ 
+    cusolverDnSetStream( handle, parsec_body.stream );
+
+    /* GPU kernel */
+    status = cusolverDnDpotrf(handle, CUBLAS_FILL_MODE_LOWER, tempkn, T, ldak, gpu_buffer, buffer_size, dev_info);
+    assert(CUSOLVER_STATUS_SUCCESS == status);
+
+    /* Update info */
+    cudaMemcpyAsync(&potrf_info[k], dev_info, sizeof(int), cudaMemcpyDeviceToHost, parsec_body.stream);
+#endif
+}
+END
+
+BODY [type=RECURSIVE]
+{
+    int tempkm = k == descA->mt-1 ? descA->m - k*descA->mb : descA->mb;
+    int iinfo = 0;
+
+    if (tempkm > smallnb)
+    {
+        subtile_desc_t *small_descT;
+        parsec_taskpool_t *parsec_dpotrf;
+
+        small_descT = subtile_desc_create( descA, k, k,
+                                           smallnb, smallnb, 0, 0, tempkm, tempkm );
+        small_descT->mat = T;
+
+        parsec_dpotrf = dplasma_dpotrf_New(uplo, (parsec_tiled_matrix_dc_t *)small_descT, &iinfo );
+
+        parsec_recursivecall(es, (parsec_task_t*)this_task,
+                             parsec_dpotrf, dplasma_dpotrf_Destruct,
+                             1, small_descT);
+
+        return PARSEC_HOOK_RETURN_ASYNC;
+    }
+    else
+        /* Go for the sequential CPU version */
+        return PARSEC_HOOK_RETURN_NEXT;
+}
+END
+
+BODY
+{
+    if( print_more ) fprintf(stderr, "PO %d : lookahead %d, sendless %d, band_size_double %d\n", k, lookahead, send_less, band_size_double);
+
+    int tempkm = k == descA->mt-1 ? descA->m - k*descA->mb : descA->mb;
+    int iinfo = 0;
+    int ldak = descA->mb; 
+
+#if !defined(PARSEC_DRY_RUN)
+    CORE_dpotrf( uplo, tempkm, T, ldak, &iinfo );
+    if ( iinfo != 0 && *INFO == 0 )
+            *INFO = k*descA->mb+iinfo; /* Should return here */
+#endif /* !defined(PARSEC_DRY_RUN) */
+
+    printlog("CORE_dpotrf( %d )\n\t( %s, %d, A(%d,%d)[%p], %d) return info = %d\n",
+             k,
+             plasma_const(uplo), tempkm, k, k, T, descA->mb, iinfo );
+}
+END
+
+/**************************************************
+ *           potrf_hsdpotrf_convert                 *
+ **************************************************/
+potrf_hsdpotrf_convert(k) [high_priority = on]
+
+// Execution space
+k = 0 .. descA->mt-1-band_size_double
+
+//my_indicator = %{ return my_evaluate_gpu_potrf_convert(send_less, band_size_double, descA->mt, k); %}
+
+// Parallel partitioning
+:descA(k, k)
+
+// Parameters
+READ T0 <- (send_less == 1) ? T potrf_hsdpotrf(k) : NULL                              [ type = DOUBLE ]
+
+RW T <- (send_less == 1) ? NEW : NULL                                               [ type = SINGLE ] 
+     -> (send_less == 1) ? T potrf_hsdtrsm(k+band_size_double..descA->mt-1, k)        [ type = SINGLE ]
+
+; (k >= (descA->mt - PRI_CHANGE)) ? (descA->mt - k) * (descA->mt - k) * (descA->mt - k) : PRI_MAX
+
+
+BODY
+{
+    /* Convert datatype */
+    if( 1 == send_less ) {
+        if( print_more ) fprintf(stderr, "potrf_convert CPU %d\n", k);
+#if OWN_CONVERTOR
+        convert_d2s_binary_CPU(T, T0, descA->mb, descA->nb);
+#else
+        LAPACKE_dlag2s( LAPACK_COL_MAJOR, descA->mb, descA->nb, T0, descA->mb, T, descA->mb );
+#endif
+    }
+}
+END
+
+
+/**************************************************
+ *               potrf_hsdtrsm                      *
+ **************************************************/
+potrf_hsdtrsm(m, k) [high_priority = on] 
+
+// Execution space
+m = 1 .. descA->mt-1
+k = 0 .. m-1
+
+// Parallel partitioning
+: descA(m, k)
+
+// Parameters
+READ  T <- (send_less == 0) ? T potrf_hsdpotrf(k)                                        [ type = DOUBLE ]
+        <- (send_less && m-k < band_size_double) ? T potrf_hsdpotrf(k)                   [ type = DOUBLE ] 
+        <- (send_less && m-k >= band_size_double) ? T potrf_hsdpotrf_convert(k)          [ type = SINGLE ] 
+
+RW    C <- (k == 0 && (m-k) < band_size_double) ? A potrf_bind_A(m, k)                   [ type = DOUBLE ]
+        <- (k == 0 && (m-k) >= band_size_double) ? A potrf_bind_A(m, k)                  [ type = SINGLE ]
+        <- ((m-k) < band_size_double)? C potrf_hsdgemm(m, k, k-1)                        [ type = DOUBLE ]
+        <- C potrf_hsdgemm(m, k, k-1)                                                    [ type = SINGLE ]
+        -> ((m-k) < band_size_double)? A potrf_hsdsyrk(k, m)                             [ type = DOUBLE ]
+        -> ((m-k) < band_size_double)? A potrf_hsdgemm(m, k+1..m-1, k)                   [ type = DOUBLE ]
+        -> ((m-k) < band_size_double && send_less == 0)? B potrf_hsdgemm(m+1..descA->mt-1, m, k)          [ type = DOUBLE ]
+        -> (m-k < band_size_double && send_less) ? B potrf_hsdgemm(m+1 .. m+band_size_double-1, m, k)     [ type = DOUBLE ]
+        -> (m-k < band_size_double && send_less) ? C0 potrf_hsdtrsm_convert(m, k)                         [ type = DOUBLE ]
+        -> ((m-k) < band_size_double)? descA(m, k)                                       [ type = DOUBLE ]
+        -> ((m-k) >= band_size_double)? A potrf_hsdsyrk(k, m)                            [ type = SINGLE ]
+        -> ((m-k) >= band_size_double)? A potrf_hsdgemm(m, k+1..m-1, k)                  [ type = SINGLE ]
+        -> ((m-k) >= band_size_double)? B potrf_hsdgemm(m+1..descA->mt-1, m, k)          [ type = SINGLE ]
+        -> ((m-k) >= band_size_double)? descA(m, k)                                      [ type = SINGLE ]
+
+//CTL ctl <- (lookahead > 0 && m > lookahead+k)? ctl potrf_hsdsyrk(k, k+1)
+
+CTL ctl1 <- (lookahead > 2 && m > lookahead+k)? ctl1 potrf_hsdgemm(k+2, k+1, k)
+
+; (m >= (descA->mt - PRI_CHANGE)) ? (descA->mt - m) * (descA->mt - m) * (descA->mt - m) + 3 * ((2 * descA->mt) - k - m - 1) * (m - k) : PRI_MAX
+
+BODY [type=CUDA weight=(m+1-k)]
+{
+#if defined(EXAGEOSTAT_USE_CUDA)
+    if( print_more_gpu ) printf("GPU_trsm %d %d : band_size_double %d, band_size_single %d, send_less %d cuda_index %d\n", m, k, band_size_double, band_size_single, send_less, gpu_device->cuda_index);
+    int tempmm = m == descA->mt-1 ? descA->m - m * descA->mb : descA->mb;
+    int ldak = descA->mb; 
+    int ldam = descA->mb; 
+    const double alpha_double = (double)1.0;
+    const float alpha_float = (float)1.0;
+
+    /* Get handle_cublas */ 
+    parsec_potrf_workspace_t *_ws_handle = (parsec_potrf_workspace_t *)ws_handle_cublas_gpu;
+    parsec_potrf_stream_workspace_t stream_handle = lookup_gpu_workspace(gpu_device, gpu_stream, _ws_handle);
+    cublasHandle_t handle = stream_handle.handle_cublas;
+
+    cublasStatus_t status;
+    cublasSetStream( handle, parsec_body.stream );
+
+    if ( m-k < band_size_double ) {
+        status = cublasDtrsm( handle, CUBLAS_SIDE_RIGHT, CUBLAS_FILL_MODE_LOWER,
+                              CUBLAS_OP_T, CUBLAS_DIAG_NON_UNIT,
+                              tempmm, descA->mb,
+                              &alpha_double, (double *)T /*A(k, k)*/, ldak,
+                                             (double *)C /*A(m, k)*/, ldam);
+    } else {
+        /* If receive double to convert to single first */
+        if( 0 == send_less ) {
+		/* Get the temporary buffer on GPU */
+                parsec_potrf_workspace_t *_ws_single1 = (parsec_potrf_workspace_t *)ws_single1;
+		parsec_potrf_stream_workspace_t stream_single1 = lookup_gpu_workspace(gpu_device, gpu_stream, _ws_single1);
+		float *T_s = (float *)stream_single1.gpu_buffer;
+		assert(NULL != T_s);
+
+		/* Convert datatype */
+                double2float_GPU( descA->mb, descA->nb, T, descA->mb, T_s, descA->mb, parsec_body.stream );
+
+                status = cublasStrsm( handle, CUBLAS_SIDE_RIGHT, CUBLAS_FILL_MODE_LOWER,
+                                      CUBLAS_OP_T, CUBLAS_DIAG_NON_UNIT,
+     				      tempmm, descA->mb,
+				      &alpha_float, (float *)T_s /*A(k, k)*/, ldak,
+				                    (float *)C   /*A(m, k)*/, ldam);
+	} else {
+                status = cublasStrsm( handle, CUBLAS_SIDE_RIGHT, CUBLAS_FILL_MODE_LOWER,
+                                      CUBLAS_OP_T, CUBLAS_DIAG_NON_UNIT,
+                                      tempmm, descA->mb,
+                                      &alpha_float, (float *)T /*A(k, k)*/, ldak,
+                                                    (float *)C /*A(m, k)*/, ldam);
+        }
+    }
+#endif
+}
+END
+
+BODY
+{
+
+if( 0 ) {
+    if( print_more ) fprintf(stderr, "TRSM %d %d : lookahead %d, sendless %d, band_size_double %d\n", m, k, lookahead, send_less, band_size_double);
+    if( m-k < band_size_double )
+        parsec_print_matrix( C, 10, 10, descA->mb );
+    else
+        parsec_print_matrix_single( C, 10, 10, descA->mb );
+}
+
+    int tempmm = m == descA->mt-1 ? descA->m - m * descA->mb : descA->mb;
+    int ldak = descA->mb; 
+    int ldam = descA->mb; 
+
+#if !defined(PARSEC_DRY_RUN)
+    if( m-k < band_size_double ) {
+        CORE_dtrsm(PlasmaRight, PlasmaLower, PlasmaTrans, PlasmaNonUnit,
+                   tempmm, descA->nb,
+                   (double)1.0, T /*A(k, k)*/, ldak,
+                                C /*A(m, k)*/, ldam);
+    } else {
+        /* If receive double to convert to single first */
+        if( 0 == send_less ) {
+            float *T_s = (float *)parsec_private_memory_pop(p_work_single); 
+#if OWN_CONVERTOR
+            convert_d2s_binary_CPU(T_s, T, descA->mb, descA->nb);
+#else
+            LAPACKE_dlag2s( LAPACK_COL_MAJOR, descA->mb, descA->nb, T, descA->mb, T_s, descA->mb );
+#endif
+
+            CORE_strsm(PlasmaRight, PlasmaLower, PlasmaTrans, PlasmaNonUnit,
+                       tempmm, descA->nb,
+                       (float)1.0, T_s /*A(k, k)*/, ldak,
+                                   C   /*A(m, k)*/, ldam);
+
+            parsec_private_memory_push(p_work_single, T_s);
+        } else {
+            CORE_strsm(PlasmaRight, PlasmaLower, PlasmaTrans, PlasmaNonUnit,
+                       tempmm, descA->nb,
+                       (float)1.0, T /*A(k, k)*/, ldak,
+                                   C /*A(m, k)*/, ldam);
+       }
+    }
+#endif  /* !defined(PARSEC_DRY_RUN) */
+
+    printlog("CORE_dtrsm( %d, %d )\n\t( %s, %s, %s, %s, %d, %d, %f, A(%d,%d)[%p], %d,  A(%d,%d)[%p], %d)\n",
+             m, k,
+             plasma_const( PlasmaRight ), plasma_const( PlasmaLower ),
+             plasma_const( PlasmaTrans ), plasma_const( PlasmaNonUnit ),
+             tempmm, descA->nb,
+             1.0, k, k, T, ldak,
+                  m, k, C, ldam);
+}
+END
+
+/**************************************************
+ *            potrf_hsdtrsm_convert                 *
+ **************************************************/
+potrf_hsdtrsm_convert(m, k) [high_priority = on]
+
+// Execution space
+m = 1 .. descA->mt-1
+k = %{ return parsec_imax(m-band_size_double+1, 0); %} .. m-1
+
+//my_indicator = %{ return my_evaluate_gpu_trsm_convert(send_less, band_size_double, descA->mt, m, k); %}
+
+// Parallel partitioning
+: descA(m, k)
+
+READ C0 <- (send_less == 1) ? C potrf_hsdtrsm(m, k) : NULL                                                                  [ type = DOUBLE ]
+
+RW   C  <- (send_less == 1 && m+band_size_double < descA->lmt) ? NEW : NULL                                                 [ type = SINGLE ]
+        -> (send_less == 1 && m+band_size_double < descA->lmt) ? B potrf_hsdgemm(m+band_size_double..descA->mt-1, m, k)     [ type = SINGLE ]
+
+; (m >= (descA->mt - PRI_CHANGE)) ? (descA->mt - m) * (descA->mt - m) * (descA->mt - m) + 3 * ((2 * descA->mt) - k - m - 1) * (m - k) : PRI_MAX
+
+BODY
+{
+    if( m+band_size_double < descA->lmt && 1 == send_less ) {
+        int tempmm = m == descA->mt-1 ? descA->m - m * descA->mb : descA->mb;
+        if( print_more ) printf("trsm_convert CPU %d %d\n", m, k);
+        /* Convert datatype */
+#if OWN_CONVERTOR
+        convert_d2s_binary_CPU(C, C0, descA->mb, descA->nb);
+#else
+        LAPACKE_dlag2s( LAPACK_COL_MAJOR, descA->mb, descA->nb, C0, descA->mb, C, descA->mb );
+#endif
+    }
+}
+END
+
+
+/**************************************************
+ *               potrf_hsdsyrk                      *
+ **************************************************/
+potrf_hsdsyrk(k, m) [high_priority = on]
+
+// Execution space
+k = 0   .. descA->mt-2
+m = k+1 .. descA->mt-1
+
+// Parallel partitioning
+: descA(m, m)
+
+//Parameters
+READ  A <- (m-k < band_size_double)? C potrf_hsdtrsm(m, k)                       [ type = DOUBLE ]
+        <- C potrf_hsdtrsm(m, k)                                                 [ type = SINGLE ]
+
+RW    T <- (k == 0)   ? A potrf_bind_A(m, m) : T potrf_hsdsyrk(k-1, m)           [ type = DOUBLE ]
+        -> (m == k+1) ? T potrf_hsdpotrf(m)  : T potrf_hsdsyrk(k+1, m)           [ type = DOUBLE ]
+
+//CTL ctl -> (lookahead > 0 && m == k+1)? ctl potrf_hsdtrsm(lookahead+m .. descA->mt-1, k)
+
+; (m >= (descA->mt - PRI_CHANGE)) ? (descA->mt - m) * (descA->mt - m) * (descA->mt - m) + 3 * (m - k) : PRI_MAX
+
+BODY [type=CUDA weight=(m+1-k)]
+{
+#if defined(EXAGEOSTAT_USE_CUDA)
+    int tempmm = m == descA->mt-1 ? descA->m - m*descA->mb : descA->mb;
+    int ldam = descA->mb;
+    const double alpha = (double)-1.0;
+    const double beta = (double)1.0;
+    if( print_more_gpu ) printf("GPU_syrk: %d %d : cuda_index %d\n", m, k, gpu_device->cuda_index);
+
+    /* Get handle_cublas */
+    parsec_potrf_workspace_t *_ws_handle = (parsec_potrf_workspace_t *)ws_handle_cublas_gpu;
+    parsec_potrf_stream_workspace_t stream_handle = lookup_gpu_workspace(gpu_device, gpu_stream, _ws_handle);
+    cublasHandle_t handle = stream_handle.handle_cublas;
+
+    cublasStatus_t status;
+    cublasSetStream( handle, parsec_body.stream );
+
+    double *A_d;
+    if( m-k >= band_size_double ) {
+        /* Get the temporary buffer on GPU */
+        parsec_potrf_workspace_t *_ws_double1 = (parsec_potrf_workspace_t *)ws_double1;
+        parsec_potrf_stream_workspace_t stream_double1 = lookup_gpu_workspace(gpu_device, gpu_stream, _ws_double1);
+        A_d = (double *)stream_double1.gpu_buffer;
+        assert(NULL != A_d);
+
+        /* Convert datatype */
+        float2double_GPU( descA->mb, descA->nb, A, descA->mb, A_d, descA->mb, parsec_body.stream );
+    }
+
+    status = cublasDsyrk( handle, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_N,
+                    tempmm, descA->mb,
+                    &alpha, ( m-k >= band_size_double? (double *)A_d: (double *)A ) /*A(m, k)*/, ldam,
+                    &beta, (double *)T /*A(m, m)*/, ldam);
+#endif
+}
+END
+
+BODY
+{
+    if( print_more ) fprintf(stderr, "SYRK %d %d before: lookahead %d, sendless %d, band_size_double %d\n", m, k, lookahead, send_less, band_size_double);
+
+    int tempmm = m == descA->mt-1 ? descA->m - m*descA->mb : descA->mb;
+    int ldam = descA->mb; 
+
+#if !defined(PARSEC_DRY_RUN)
+    if( (m-k) >= band_size_double ) {
+        double *A_d = (double *)parsec_private_memory_pop(p_work_double); 
+#if OWN_CONVERTOR
+        convert_s2d_binary_CPU(A_d, A, descA->mb, descA->nb);
+#else
+        LAPACKE_slag2d( LAPACK_COL_MAJOR, descA->mb, descA->nb, A, descA->mb, A_d, descA->mb );
+#endif
+
+        CORE_dsyrk(PlasmaLower, PlasmaNoTrans,
+                   tempmm, descA->mb,
+                   (double)-1.0, A_d /*A(m, k)*/, ldam,
+                   (double) 1.0, T /*A(m, m)*/, ldam);
+
+        parsec_private_memory_push(p_work_double, A_d);
+    } else {
+        CORE_dsyrk(PlasmaLower, PlasmaNoTrans,
+                   tempmm, descA->mb,
+                   (double)-1.0, A /*A(m, k)*/, ldam,
+                   (double) 1.0, T /*A(m, m)*/, ldam);
+    }
+#endif  /* !defined(PARSEC_DRY_RUN) */
+
+    printlog(
+             "CORE_dsyrk( %d, %d )\n\t( %s, %s, %d, %d, %f, A(%d,%d)[%p], %d, %f, A(%d,%d)[%p], %d)\n",
+             k, m,
+             plasma_const( PlasmaLower ), plasma_const( PlasmaNoTrans ),
+             tempmm, descA->mb,
+             -1.0, m, k, A, ldam,
+              1.0, m, m, T, ldam);
+}
+END
+
+/**************************************************
+ *               potrf_hsdgemm                      *
+ **************************************************/
+// Name
+potrf_hsdgemm(m, n, k)
+
+// Execution space
+k = 0   .. descA->mt-3
+m = k+2 .. descA->mt-1
+n = k+1 .. m-1
+
+// Parallel partitioning
+: descA(m, n)
+
+// Parameters
+READ  A <- (m-k < band_size_double)? C potrf_hsdtrsm(m, k)                         [ type = DOUBLE ]
+        <- C potrf_hsdtrsm(m, k)                                                   [ type = SINGLE ]
+
+READ   B <- (n-k < band_size_double && m-n < band_size_double) ? C potrf_hsdtrsm(n, k)                             [ type = DOUBLE ]
+         <- (n-k < band_size_double && m-n >= band_size_double && send_less == 0) ? C potrf_hsdtrsm(n, k)          [ type = DOUBLE ]
+         <- (n-k < band_size_double && m-n >= band_size_double && send_less) ? C potrf_hsdtrsm_convert(n, k)       [ type = SINGLE ]
+         <- C potrf_hsdtrsm(n, k)                                                  [ type = SINGLE ]
+
+RW    C <- (k == 0 && m-n < band_size_double)? A potrf_bind_A(m, n)                [ type = DOUBLE ]
+        <- (k == 0 && m-n >= band_size_double)? A potrf_bind_A(m, n)               [ type = SINGLE ]
+        <- (m-n < band_size_double)? C potrf_hsdgemm(m, n, k-1)                    [ type = DOUBLE ] 
+        <- (m-n < band_size_single)? C potrf_hsdgemm(m, n, k-1)                    [ type = SINGLE ] 
+        <- C potrf_hsdgemm(m, n, k-1)                                              [ type = HALF ] 
+        -> (n == k+1 && m-n < band_size_double)? C potrf_hsdtrsm(m, n)             [ type = DOUBLE ]
+        -> (n == k+1 && m-n >= band_size_double)? C potrf_hsdtrsm(m, n)            [ type = SINGLE ]
+        -> (n != k+1 && m-n < band_size_double)? C potrf_hsdgemm(m, n, k+1)        [ type = DOUBLE ]
+        -> (n != k+1 && m-n >= band_size_double && m-n < band_size_single)? C potrf_hsdgemm(m, n, k+1)             [ type = SINGLE ]
+        -> (n != k+1 && m-n >= band_size_single)? C potrf_hsdgemm(m, n, k+1)       [ type = HALF ]
+
+CTL ctl1 -> (lookahead > 2 && m == k+2 && n == k+1)? ctl1 potrf_hsdtrsm(k+lookahead+1 .. descA->mt-1, k)
+
+; (m >= (descA->mt - PRI_CHANGE)) ? (descA->mt - m) * (descA->mt - m) * (descA->mt - m) + 3 * ((2 * descA->mt) - m - n - 3) * (m - n) + 6 * (m - k) : PRI_MAX
+
+BODY [type=CUDA weight=(n+1-k)]
+{
+#if defined(EXAGEOSTAT_USE_CUDA)
+    int tempmm = m == descA->mt-1 ? descA->m - m * descA->mb : descA->mb;
+    int ldam = descA->mb; 
+    int ldan = descA->mb; 
+    const double alpha_double = (double)-1.0;
+    const double beta_double = (double)1.0;
+    const float alpha_float = (float)-1.0;
+    const float beta_float = (float)1.0;
+    if( print_more_gpu ) printf("GPU_gemm: %d %d %d; band_size_double: %d\n", m, n, k, band_size_double);
+
+    cublasStatus_t status;
+    cudaError_t err;
+
+    if( m-n < band_size_double ) {
+        double *A_d, *B_d;
+
+        /* Get handle_cublas */
+        parsec_potrf_workspace_t * _ws_handle = (parsec_potrf_workspace_t *)ws_handle_cublas_gpu;
+        parsec_potrf_stream_workspace_t stream_handle = lookup_gpu_workspace(gpu_device, gpu_stream, _ws_handle);
+        cublasHandle_t handle = stream_handle.handle_cublas;
+
+        cublasSetStream( handle, parsec_body.stream );
+
+        if( m-k >= band_size_double ) {
+            /* Get the temporary buffer on GPU */
+            parsec_potrf_workspace_t *_ws_double1 = (parsec_potrf_workspace_t *)ws_double1;
+            parsec_potrf_stream_workspace_t stream_double1 = lookup_gpu_workspace(gpu_device, gpu_stream, _ws_double1);
+            A_d = (double *)stream_double1.gpu_buffer;
+            assert(NULL != A_d);
+
+            /* Convert datatype */
+            float2double_GPU( descA->mb, descA->nb, A, descA->mb, A_d, descA->mb, parsec_body.stream );
+        }
+
+        if( n-k >= band_size_double ) {
+            /* Get the temporary buffer on GPU */
+            parsec_potrf_workspace_t *_ws_double2 = (parsec_potrf_workspace_t *)ws_double2;
+            parsec_potrf_stream_workspace_t stream_double2 = lookup_gpu_workspace(gpu_device, gpu_stream, _ws_double2);
+            B_d = (double *)stream_double2.gpu_buffer;
+            assert(NULL != B_d);
+
+            /* Convert datatype */
+            float2double_GPU( descA->mb, descA->nb, B, descA->mb, B_d, descA->mb, parsec_body.stream );
+        }
+
+        status = cublasDgemm( handle, CUBLAS_OP_N, CUBLAS_OP_T,
+                 tempmm, descA->mb, descA->mb, 
+                 &alpha_double, ((m-k >= band_size_double)? (double *)A_d: (double *)A), ldam,
+                                ((n-k >= band_size_double)? (double *)B_d: (double *)B), ldan,
+                 &beta_double,  (double *)C, ldam );
+
+    } else if( m-n < band_size_single ) {
+        float *B_s;
+
+        /* Get handle_cublas */
+        parsec_potrf_workspace_t * _ws_handle = (parsec_potrf_workspace_t *)ws_handle_cublas_gpu;
+        parsec_potrf_stream_workspace_t stream_handle = lookup_gpu_workspace(gpu_device, gpu_stream, _ws_handle);
+        cublasHandle_t handle = stream_handle.handle_cublas;
+
+        cublasSetStream( handle, parsec_body.stream );
+
+        if( n-k < band_size_double && 0 == send_less ) {
+            /* Get the temporary buffer on GPU */
+            parsec_potrf_workspace_t *_ws_single2 = (parsec_potrf_workspace_t *)ws_single2;
+            parsec_potrf_stream_workspace_t stream_single2 = lookup_gpu_workspace(gpu_device, gpu_stream, _ws_single2);
+            B_s = (float *)stream_single2.gpu_buffer;
+            assert(NULL != B_s);
+
+            /* Convert datatype */
+            double2float_GPU( descA->mb, descA->nb, B, descA->mb, B_s, descA->mb, parsec_body.stream );
+        }
+
+        status = cublasSgemm( handle, CUBLAS_OP_N, CUBLAS_OP_T,
+                 tempmm, descA->mb, descA->mb,
+                 &alpha_float, (float *)A, ldam,
+                               (((n-k) < band_size_double && 0 == send_less )? (float *)B_s: (float *)B), ldan,
+                 &beta_float,  (float *)C, ldam );
+
+    } else {
+        float *B_s, *C_s;
+        void *A_h, *B_h, *C_h;
+
+        if( print_more_gpu ) printf("tensor_gemm %d %d %d : band_size_double %d, band_size_single %d tensor_gemm %d \n", m, n, k, band_size_double, band_size_single, tensor_gemm);
+
+        /* Get handle_cublas that to run on Tensor cores */
+        parsec_potrf_workspace_t * _ws_handle = (parsec_potrf_workspace_t *)ws_handle_cublas_tensor;
+        parsec_potrf_stream_workspace_t stream_handle = lookup_gpu_workspace(gpu_device, gpu_stream, _ws_handle);
+        cublasHandle_t handle = stream_handle.handle_cublas;
+
+        cublasSetStream( handle, parsec_body.stream );
+
+        /* Convert A from double to half */
+        /* Get the temporary buffer on GPU */
+        parsec_potrf_workspace_t *_ws_half1 = (parsec_potrf_workspace_t *)ws_half1;
+        parsec_potrf_stream_workspace_t stream_half1 = lookup_gpu_workspace(gpu_device, gpu_stream, _ws_half1);
+        A_h = (void *)stream_half1.gpu_buffer;
+        assert(NULL != A_h);
+
+        /* Convert datatype */
+        float2half_GPU( descA->mb, descA->nb, A, descA->mb, A_h, descA->mb, parsec_body.stream );
+
+        /* Convert B from double to half */
+        if( n-k < band_size_double && 0 == send_less ) {
+            /* Get the temporary buffer on GPU */
+            parsec_potrf_workspace_t *_ws_single1 = (parsec_potrf_workspace_t *)ws_single1;
+            parsec_potrf_stream_workspace_t stream_single1 = lookup_gpu_workspace(gpu_device, gpu_stream, _ws_single1);
+            B_s = (float *)stream_single1.gpu_buffer;
+            assert(NULL != B_s);
+
+            /* Convert datatype */
+            double2float_GPU( descA->mb, descA->nb, B, descA->mb, B_s, descA->mb, parsec_body.stream );
+
+            /* Get the temporary buffer on GPU */
+            parsec_potrf_workspace_t *_ws_half2 = (parsec_potrf_workspace_t *)ws_half2;
+            parsec_potrf_stream_workspace_t stream_half2 = lookup_gpu_workspace(gpu_device, gpu_stream, _ws_half2);
+            B_h = (void *)stream_half2.gpu_buffer;
+            assert(NULL != B_h);
+
+            /* Convert datatype */
+            float2half_GPU( descA->mb, descA->nb, B_s, descA->mb, B_h, descA->mb, parsec_body.stream );
+
+        } else {
+            /* Get the temporary buffer on GPU */
+            parsec_potrf_workspace_t *_ws_half2 = (parsec_potrf_workspace_t *)ws_half2;
+            parsec_potrf_stream_workspace_t stream_half2 = lookup_gpu_workspace(gpu_device, gpu_stream, _ws_half2);
+            B_h = (void *)stream_half2.gpu_buffer;
+            assert(NULL != B_h);
+
+            /* Convert datatype */
+            float2half_GPU( descA->mb, descA->nb, B, descA->mb, B_h, descA->mb, parsec_body.stream );
+        }
+
+        /* First local GEMM convert C from single to half */
+        if( 0 == k && ( 2 == tensor_gemm || 3 == tensor_gemm ) ) {
+            /* Get the temporary buffer on GPU */
+            parsec_potrf_workspace_t *_ws_half3 = (parsec_potrf_workspace_t *)ws_half3;
+            parsec_potrf_stream_workspace_t stream_half3 = lookup_gpu_workspace(gpu_device, gpu_stream, _ws_half3);
+            C_h = (void *)stream_half3.gpu_buffer;
+            assert(NULL != C_h);
+
+            /* Convert datatype */
+            float2half_GPU( descA->mb, descA->nb, C, descA->mb, C_h, descA->mb, parsec_body.stream );
+
+            /* Copy C_h to C */
+            memcpy_half_GPU( descA->mb, descA->nb, C_h, C, parsec_body.stream );
+        }
+
+        // TODO is CUBLAS_GEMM_DEFAULT_TENSOR_OP correct?
+        switch( tensor_gemm ) {
+            case 1:
+                 /* AB16F_C32F_OP32F */
+                 status = cublasGemmEx(handle, CUBLAS_OP_N, CUBLAS_OP_T,
+                                   (int64_t)tempmm, (int64_t)descA->mb, (int64_t)descA->mb,
+                                   &alpha_float, A_h, CUDA_R_16F, (int64_t)ldam, 
+                                                 B_h, CUDA_R_16F, (int64_t)ldan, 
+                                   &beta_float,  C,   CUDA_R_32F, (int64_t)ldam, 
+                                   CUDA_R_32F, CUBLAS_GEMM_DEFAULT_TENSOR_OP); 
+                 break;
+
+            case 2:
+                 /* AB16F_C16F_OP32F */
+                 status = cublasGemmEx(handle, CUBLAS_OP_N, CUBLAS_OP_T,
+                                   (int64_t)tempmm, (int64_t)descA->mb, (int64_t)descA->mb, 
+                                   &alpha_float, A_h, CUDA_R_16F, (int64_t)ldam,
+                                                 B_h, CUDA_R_16F, (int64_t)ldan, 
+                                   &beta_float,  C,   CUDA_R_16F, (int64_t)ldam, 
+                                   CUDA_R_32F, CUBLAS_GEMM_DEFAULT_TENSOR_OP);
+                 break;
+
+            case 3:
+                 /* AB16F_C16F_OP16F */
+                 status = my_cublasGemmEx(handle, CUBLAS_OP_N, CUBLAS_OP_T,
+                                   (int64_t)tempmm, (int64_t)descA->mb, (int64_t)descA->mb, 
+                                   &alpha_float, A_h, CUDA_R_16F, (int64_t)ldam, 
+                                                 B_h, CUDA_R_16F, (int64_t)ldan, 
+                                   &beta_float,  C,   CUDA_R_16F, (int64_t)ldam, 
+                                   CUDA_R_16F, CUBLAS_GEMM_DEFAULT_TENSOR_OP);
+                 break;
+
+            default:
+                 fprintf(stderr, "tensor_gemm should 1, 2 or 3\n");
+        }
+
+        /* After last local GEMM convert C from half to single */
+        if( n-1 == k && ( 2 == tensor_gemm || 3 == tensor_gemm ) ) {
+            /* Get the temporary buffer on GPU */
+            parsec_potrf_workspace_t *_ws_single2 = (parsec_potrf_workspace_t *)ws_single2;
+            parsec_potrf_stream_workspace_t stream_single2 = lookup_gpu_workspace(gpu_device, gpu_stream, _ws_single2);
+            C_s = (float *)stream_single2.gpu_buffer;
+            assert(NULL != C_s);
+
+            /* Convert datatype */
+            half2float_GPU( descA->mb, descA->nb, C, descA->mb, C_s, descA->mb, parsec_body.stream );
+
+            /* Copy C_s to C */
+            memcpy_float_GPU( descA->mb, descA->nb, C_s, C, parsec_body.stream );
+        }
+    }
+#endif
+
+}
+END
+
+BODY
+{
+if( 0 && m == descA->lmt-2 ) {
+    if( print_more ) fprintf(stderr, "PO %d : lookahead %d, sendless %d, band_size_double %d\n", k, lookahead, send_less, band_size_double);
+    parsec_print_matrix( C, 10, 10, descA->mb );
+}
+
+    int tempmm = m == descA->mt-1 ? descA->m - m * descA->mb : descA->mb;
+    int ldam = descA->mb; 
+    int ldan = descA->mb; 
+
+    if( m-n < band_size_double ) {
+        double *A_d, *B_d;
+        if( m-k >= band_size_double ) {
+            A_d = (double *)parsec_private_memory_pop(p_work_double); 
+#if OWN_CONVERTOR
+            convert_s2d_binary_CPU(A_d, A, descA->mb, descA->nb);
+#else
+            LAPACKE_slag2d( LAPACK_COL_MAJOR, descA->mb, descA->nb, A, descA->mb, A_d, descA->mb );
+#endif
+        }
+
+        if( n-k >= band_size_double ) {
+            B_d = (double *)parsec_private_memory_pop(p_work_double);
+#if OWN_CONVERTOR
+            convert_s2d_binary_CPU(B_d, B, descA->mb, descA->nb);
+#else
+            LAPACKE_slag2d( LAPACK_COL_MAJOR, descA->mb, descA->nb, B, descA->mb, B_d, descA->mb );
+#endif
+        }
+
+        CORE_dgemm(PlasmaNoTrans, PlasmaTrans,
+                   tempmm, descA->mb, descA->mb,
+                   (double)-1.0, ((m-k >= band_size_double)? A_d: A) /*A(m, k)*/, ldam,
+                                 ((n-k >= band_size_double)? B_d: B) /*A(n, k)*/, ldan,
+                   (double) 1.0, C /*A(m, n)*/, ldam);
+
+        if( m-k >= band_size_double ) parsec_private_memory_push(p_work_double, A_d);
+        if( n-k >= band_size_double ) parsec_private_memory_push(p_work_double, B_d);
+    } else {
+        float *B_s;
+        if( n-k < band_size_double && 0 == send_less ) {
+            B_s = (float *)parsec_private_memory_pop(p_work_single); 
+#if OWN_CONVERTOR
+            convert_d2s_binary_CPU(B_s, B, descA->mb, descA->nb);
+#else
+            LAPACKE_dlag2s( LAPACK_COL_MAJOR, descA->mb, descA->nb, B, descA->mb, B_s, descA->mb );
+#endif
+        }
+
+        CORE_sgemm(PlasmaNoTrans, PlasmaTrans,
+                   tempmm, descA->mb, descA->mb,
+                   (float)-1.0,  A                          /*A(m, k)*/, ldam,
+                                ((n-k < band_size_double && 0 == send_less)? B_s: B) /*A(n, k)*/, ldan,
+                   (float) 1.0, C /*A(m, n)*/, ldam);
+
+        if( n-k < band_size_double && 0 == send_less ) parsec_private_memory_push(p_work_single, B_s);
+    }
+
+    printlog("CORE_dgemm( %d, %d, %d )\n\t( %s, %s, %d, %d, %d, %f, A(%d,%d)[%p], %d, A(%d,%d)[%p], %d, %f, A(%d,%d)[%p], %d)\n",
+             m, n, k,
+             plasma_const( PlasmaNoTrans ),  plasma_const( PlasmaTrans ),
+             tempmm, descA->mb, descA->mb,
+             -1.0, m, k, A, ldam,
+                   n, k, B, ldan,
+              1.0, m, n, C, ldam);
+}
+END

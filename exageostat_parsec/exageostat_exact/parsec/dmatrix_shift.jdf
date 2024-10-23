@@ -1,0 +1,95 @@
+extern "C" %{
+/*
+ * Copyright (c) 2017-2018 The Universiy of Tennessee and The Universiy
+ *                         of Tennessee Research Foundation. All rights
+ *                         reserved.
+ */
+
+#include "mix_precision_internal.h"
+
+/* Print more info */
+static int print_more = 0;
+
+%}
+
+descA                [ type = "parsec_tiled_matrix_dc_t *" ]
+multiple             [ type = "int" ]
+
+
+Task(n)
+
+n = 0 .. descA->lnt-1
+
+: descA(n, n)
+
+RW A <- descA(n, n) 
+     -> descA(n, n)
+
+BODY
+{
+	if( print_more ) printf("%d %d : CPU dmatrix shift\n", n);
+	int n0 = n * descA->nb;
+
+	//parsec_core_dshift(A, descA->nb, n0, multiple);
+	void core_dshift(parsec_tiled_matrix_dc_t *, int, int);
+	core_dshift(A, descA->nb, n0);
+}
+END
+
+extern "C" %{
+
+/**
+ * @param [in] dcA:    the data, already distributed and allocated
+ * @return the parsec object to schedule.
+ */
+parsec_taskpool_t*
+parsec_dmatrix_shift_New(parsec_context_t *parsec,
+		parsec_tiled_matrix_dc_t *dcA, int multiple)
+{
+    parsec_taskpool_t* dmatrix_shift_taskpool;
+    parsec_dmatrix_shift_taskpool_t* taskpool = NULL;
+
+    assert( dcA->mb == dcA->nb );
+
+    taskpool = parsec_dmatrix_shift_new( dcA, multiple );
+    dmatrix_shift_taskpool = (parsec_taskpool_t*)taskpool;
+
+    parsec_matrix_add2arena(taskpool->arenas[PARSEC_dmatrix_shift_DEFAULT_ARENA],
+                            parsec_datatype_double_t, matrix_UpperLower,
+                            1, dcA->mb, dcA->nb, dcA->mb,
+                            PARSEC_ARENA_ALIGNMENT_SSE, -1 );
+
+    return dmatrix_shift_taskpool;
+}
+
+/**
+ * @param [inout] the parsec object to destroy
+*/
+void parsec_dmatrix_shift_Destruct(parsec_taskpool_t *taskpool)
+{
+    parsec_dmatrix_shift_taskpool_t *tp = (parsec_dmatrix_shift_taskpool_t *)taskpool;
+    parsec_matrix_del2arena(tp->arenas[PARSEC_dmatrix_shift_DEFAULT_ARENA]);
+    parsec_taskpool_free(taskpool);
+}
+
+/**
+ * @param [inout] dcA: the data, already distributed and allocated
+ */
+int parsec_dmatrix_shift(parsec_context_t *parsec,
+                         parsec_tiled_matrix_dc_t *dcA, int multiple)
+{
+    parsec_taskpool_t *parsec_dmatrix_shift = NULL;
+
+    parsec_dmatrix_shift = parsec_dmatrix_shift_New( parsec, dcA, multiple ); 
+
+    if( parsec_dmatrix_shift != NULL ){
+        parsec_context_add_taskpool(parsec, parsec_dmatrix_shift);
+        parsec_context_start(parsec);
+        parsec_context_wait(parsec);
+        parsec_dmatrix_shift_Destruct(parsec_dmatrix_shift);
+    }
+
+    return 0;
+}
+
+%}

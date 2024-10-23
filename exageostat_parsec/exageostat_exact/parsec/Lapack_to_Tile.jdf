@@ -1,0 +1,89 @@
+extern "C" %{
+/*
+ * Copyright (c) 2017-2018 The Universiy of Tennessee and The Universiy
+ *                         of Tennessee Research Foundation. All rights
+ *                         reserved.
+ */
+
+#include "mix_precision_internal.h"
+
+%}
+
+descA             [ type = "parsec_tiled_matrix_dc_t *" ]
+Zobs              [ type = "double *" ]
+nZobs             [ type = "int" ]
+
+Read(m, n)
+
+m = 0 .. descA->lmt-1
+n = 0 .. 0 
+
+: descA(m, n)
+
+RW A <- descA(m, n) 
+     -> descA(m, n)
+
+BODY
+{
+       void *Z0 = (void *)Zobs + m * descA->mb * sizeof(double);
+       int size = (m == descA->lmt-1)? (nZobs - (descA->lmt-1) * descA->mb) * sizeof(double) : descA->mb * sizeof(double);
+       memcpy( A, Z0, size );
+}
+END
+
+
+extern "C" %{
+
+/**
+ * @param [in] dcA:    the data, already distributed and allocated
+ * @return the parsec object to schedule.
+ */
+parsec_taskpool_t*
+parsec_Lapack_to_Tile_New(parsec_tiled_matrix_dc_t *dcA, double *Zobs, int nZobs) 
+{
+    parsec_taskpool_t* Lapack_to_Tile_taskpool;
+    parsec_Lapack_to_Tile_taskpool_t* taskpool = NULL;
+
+    taskpool = parsec_Lapack_to_Tile_new(dcA, Zobs, nZobs); 
+    Lapack_to_Tile_taskpool = (parsec_taskpool_t*)taskpool;
+
+    parsec_matrix_add2arena(taskpool->arenas[PARSEC_Lapack_to_Tile_DEFAULT_ARENA],
+                            parsec_datatype_double_t, matrix_UpperLower,
+                            1, dcA->mb, 1, dcA->mb,
+                            PARSEC_ARENA_ALIGNMENT_SSE, -1 );
+
+    return Lapack_to_Tile_taskpool;
+}
+
+/**
+ * @param [inout] the parsec object to destroy
+*/
+void parsec_Lapack_to_Tile_Destruct(parsec_taskpool_t *taskpool)
+{
+    parsec_Lapack_to_Tile_taskpool_t *Lapack_to_Tile_taskpool = (parsec_Lapack_to_Tile_taskpool_t *)taskpool;
+    parsec_matrix_del2arena(Lapack_to_Tile_taskpool->arenas[PARSEC_Lapack_to_Tile_DEFAULT_ARENA]);
+    parsec_taskpool_free(taskpool);
+}
+
+/**
+ * @brief allocate and generate dcA
+ * 
+ * @param [inout] dcA: the data, already distributed and allocated
+ */
+int parsec_Lapack_to_Tile(parsec_context_t *parsec,
+		parsec_tiled_matrix_dc_t *dcA, double *Zobs, int nZobs) 
+{
+    parsec_taskpool_t *parsec_Lapack_to_Tile = NULL;
+    parsec_Lapack_to_Tile = parsec_Lapack_to_Tile_New(dcA, Zobs, nZobs); 
+
+    if( parsec_Lapack_to_Tile != NULL ){
+        parsec_context_add_taskpool(parsec, parsec_Lapack_to_Tile);
+        parsec_context_start(parsec);
+        parsec_context_wait(parsec);
+        parsec_Lapack_to_Tile_Destruct(parsec_Lapack_to_Tile);
+    }
+
+    return 0;
+}
+
+%}

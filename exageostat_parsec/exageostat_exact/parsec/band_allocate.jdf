@@ -1,0 +1,106 @@
+extern "C" %{
+/*
+ * Copyright (c) 2017-2018 The Universiy of Tennessee and The Universiy
+ *                         of Tennessee Research Foundation. All rights
+ *                         reserved.
+ */
+
+#include "mix_precision_internal.h"
+
+%}
+
+descA                [ type = "parsec_tiled_matrix_dc_t *" ]
+band_size_double     [ type = "int" ]
+
+Task(m, n)
+
+m = 0 .. descA->lmt-1
+n = 0 .. m 
+
+: descA(m, n)
+
+READ A <- NULL
+       -> (m-n < band_size_double)? descA(m, n)          [ type = DOUBLE ]
+       -> (m-n >= band_size_double)? descA(m, n)         [ type = SINGLE ]
+
+
+BODY
+{
+    this_task->data._f_A.data_out = parsec_data_copy_new(data_of_descA(m, n), 0);
+    if( m-n < band_size_double ) {
+        this_task->data._f_A.data_out->device_private = calloc(descA->mb * descA->nb, sizeof(double));
+        (data_of_descA(m, n))->nb_elts = descA->mb * descA->nb * sizeof(double);
+    } else {
+        this_task->data._f_A.data_out->device_private = calloc(descA->mb * descA->nb, sizeof(float));
+        (data_of_descA(m, n))->nb_elts = descA->mb * descA->nb * sizeof(float);
+    }
+}
+END
+
+
+extern "C" %{
+
+/**
+ * @param [in] dcA:    the data, already distributed and allocated
+ * @return the parsec object to schedule.
+ */
+parsec_taskpool_t*
+parsec_band_allocate_New(parsec_tiled_matrix_dc_t *dcA, int band_size_double) 
+{
+    parsec_taskpool_t* band_allocate_taskpool;
+    parsec_band_allocate_taskpool_t* taskpool = NULL;
+
+    taskpool = parsec_band_allocate_new(dcA, band_size_double); 
+    band_allocate_taskpool = (parsec_taskpool_t*)taskpool;
+
+    parsec_matrix_add2arena(taskpool->arenas[PARSEC_band_allocate_DEFAULT_ARENA],
+                            parsec_datatype_double_t, matrix_UpperLower,
+                            1, 1, 1, 1,
+                            PARSEC_ARENA_ALIGNMENT_SSE, -1 );
+
+    parsec_matrix_add2arena(taskpool->arenas[PARSEC_band_allocate_DOUBLE_ARENA],
+                            parsec_datatype_double_t, matrix_UpperLower,
+                            1, dcA->mb, dcA->nb, dcA->mb,
+                            PARSEC_ARENA_ALIGNMENT_SSE, -1 );
+
+    parsec_matrix_add2arena(taskpool->arenas[PARSEC_band_allocate_SINGLE_ARENA],
+                            parsec_datatype_float_t, matrix_UpperLower,
+                            1, dcA->mb, dcA->nb, dcA->mb,
+                            PARSEC_ARENA_ALIGNMENT_SSE, -1 );
+
+    return band_allocate_taskpool;
+}
+
+/**
+ * @param [inout] the parsec object to destroy
+*/
+void parsec_band_allocate_Destruct(parsec_taskpool_t *taskpool)
+{
+    parsec_band_allocate_taskpool_t *band_allocate_taskpool = (parsec_band_allocate_taskpool_t *)taskpool;
+    parsec_matrix_del2arena(band_allocate_taskpool->arenas[PARSEC_band_allocate_DEFAULT_ARENA]);
+    parsec_matrix_del2arena(band_allocate_taskpool->arenas[PARSEC_band_allocate_DOUBLE_ARENA]);
+    parsec_matrix_del2arena(band_allocate_taskpool->arenas[PARSEC_band_allocate_SINGLE_ARENA]);
+    parsec_taskpool_free(taskpool);
+}
+
+/**
+ * @brief allocate and generate dcA
+ * 
+ * @param [inout] dcA: the data, already distributed and allocated
+ */
+void parsec_band_allocate(parsec_context_t *parsec,
+                       parsec_tiled_matrix_dc_t *dcA, int band_size_double)
+{
+	parsec_taskpool_t *parsec_band_allocate = NULL;
+
+	parsec_band_allocate = parsec_band_allocate_New(dcA, band_size_double); 
+
+	if( parsec_band_allocate != NULL ){
+		parsec_context_add_taskpool(parsec, parsec_band_allocate);
+		parsec_context_start(parsec);
+		parsec_context_wait(parsec);
+		parsec_band_allocate_Destruct(parsec_band_allocate);
+	}
+}
+
+%}

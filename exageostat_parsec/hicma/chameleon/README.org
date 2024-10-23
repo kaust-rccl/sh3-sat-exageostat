@@ -1,0 +1,149 @@
+#+TITLE: Chameleon: A dense linear algebra software for heterogeneous architectures
+#+LANGUAGE:  en
+#+OPTIONS: H:3 num:t \n:nil @:t ::t |:t _:nil ^:nil -:t f:t *:t <:t
+#+OPTIONS: TeX:t LaTeX:t skip:nil d:nil pri:nil tags:not-in-toc html-style:nil
+
+# gitlab-ci pipeline badge
+#+HTML:<a href="https://gitlab.inria.fr/solverstack/chameleon/commits/master"><img alt="pipeline status"src="https://gitlab.inria.fr/solverstack/chameleon/badges/master/pipeline.svg"/></a>
+
+# Coverity badge
+#+HTML:<a href="https://scan.coverity.com/projects/chameleon"><img alt="Coverity Scan Build Status"src="https://scan.coverity.com/projects/10590/badge.svg"/></a>
+
+Chameleon is a C library providing parallel algorithms to perform
+BLAS/LAPACK operations exploiting fully modern architectures.
+
+Chameleon dense linear algebra software relies on sequential
+task-based algorithms where sub-tasks of the overall algorithms are
+submitted to a Runtime system. Such a system is a layer between the
+application and the hardware which handles the scheduling and the
+effective execution of tasks on the processing units. A Runtime system
+such as [[http://starpu.gforge.inria.fr/][StarPU]] is able to manage automatically data transfers between
+not shared memory area (CPUs-GPUs, distributed nodes).
+
+This kind of implementation paradigm allows to design high performing
+linear algebra algorithms on very different type of architecture:
+laptop, many-core nodes, CPUs-GPUs, multiple nodes. For example,
+Chameleon is able to perform a Cholesky factorization
+(double-precision) at 80 TFlop/s on a dense matrix of order 400 000
+(i.e. 4 min). Chameleon is a sub-project of [[http://icl.cs.utk.edu/morse/][MORSE]] specifically
+dedicated to dense linear algebra.
+
+* Get Chameleon
+
+  To use last development states of Chameleon, please clone the master
+  branch. Note that Chameleon contains a ~git submodule~ *morse_cmake*.
+  To get sources please use these commands:
+
+  #+begin_src sh
+    # if git version >= 1.9
+    git clone --recursive git@gitlab.inria.fr:solverstack/chameleon.git
+    cd chameleon
+    # else
+    git clone git@gitlab.inria.fr:solverstack/chameleon.git
+    cd chameleon
+    git submodule init
+    git submodule update
+  #+end_src
+
+  Last releases of Chameleon are hosted on the [[https://gforge.inria.fr/frs/?group_id=2884][gforge.inria.fr]] for
+  now. Future releases will be available on this gitlab project.
+
+* Documentation
+** User guide
+   The user guide is available directly in the sources as emacs
+   orgmode files, see :
+   1) [[file:doc/orgmode/chapters/introduction.org][Introduction]] : description of the scientific context
+   2) [[file:doc/orgmode/chapters/installing.org][Installing]] :
+      * Getting Chameleon
+      * Prerequisites for installing Chameleon
+      * Distribution of Chameleon using Spack
+      * Build and install Chameleon with CMake
+   3) [[file:doc/orgmode/chapters/using.org][Using]] :
+      * Linking an external application with Chameleon libraries
+      * Using Chameleon executables
+      * Chameleon API
+
+   This documentation could also be generated in html and/or pdf :
+   #+begin_src
+   # build the doc with cmake (emacs with orgmode and latex are required), e.g.
+   cmake .. -DCHAMELEON_ENABLE_DOC=ON
+   make doc
+   #+end_src
+
+** Source code documentation (doxygen)
+   There is no up-to-date documentation of Chameleon.  We would like to
+   provide a doxygen documentation hosted on [[https://about.gitlab.com/2016/04/07/gitlab-pages-setup/][gitlab]] in the
+   future. Please refer to the section 2.1 of [[file:READMEDEV.org][READMEDEV]] to get
+   information about the documentation generation.
+
+** For developers
+   Please refer to the [[file:READMEDEV.org][READMEDEV]] page.
+
+* Get involved!
+** Mailing list
+
+   To contact the developers send an email to
+   [[mailto:morse-devel@lists.gforge.inria.fr][morse-devel@lists.gforge.inria.fr]]
+
+** Contributions
+
+  [[file:CONTRIBUTING.org][CONTRIBUTING]]
+
+* Authors
+
+ First, since the Chameleon library started as an extension of the
+ PLASMA library to support multiple runtime systems, all developpers
+ of the PLASMA library are developpers of the Chameleon library.
+
+ The following people contributed to the development of Chameleon:
+ * Emmanuel Agullo, PI
+ * Olivier Aumage
+ * Cedric Castagnede
+ * Terry Cojean
+ * Mathieu Faverge, PI
+ * Nathalie Furmento
+ * Reazul Hoque
+ * Hatem Ltaief
+ * Gregoire Pichon
+ * Florent Pruvost, PI
+ * Marc Sergent
+ * Guillaume Sylvand
+ * Samuel Thibault
+ * Stanimire Tomov
+ * Omar Zenati
+
+ If we forgot your name, please let us know that we can fix that mistake.
+
+* Citing Chameleon
+
+Feel free to use the following publications to reference Chameleon:
+
+  * Original paper that initiated Chameleon and the principles:
+    - Agullo, Emmanuel and Augonnet, Cédric and Dongarra, Jack and
+      Ltaief, Hatem and Namyst, Raymond and Thibault, Samuel and Tomov,
+      Stanimire, *Faster, Cheaper, Better -- a Hybridization Methodology
+      to Develop Linear Algebra Software for GPUs*, /GPU Computing Gems/,
+      [[https://hal.inria.fr/inria-00547847][First Online: 17 December 2010]].
+  * Design of the QR algorithms:
+    - Agullo, Emmanuel and Augonnet, Cédric and Dongarra, Jack and
+      Faverge, Mathieu and Ltaief, Hatem and Thibault, Samuel an
+      Tomov, Stanimire, *QR Factorization on a Multicore Node Enhanced
+      with Multiple GPU Accelerators*, /25th IEEE International Parallel
+      & Distributed Processing Symposium/, [[https://hal.inria.fr/inria-00547614][First Online: 16 December
+      2010]].
+  * Design of the LU algorithms:
+    - Agullo, Emmanuel and Augonnet, Cédric and Dongarra, Jack and
+      Faverge, Mathieu and Langou, Julien and Ltaief, Hatem and Tomov,
+      Stanimire, *LU Factorization for Accelerator-based Systems*,
+      /9th ACS/IEEE International Conference on Computer Systems and
+      Applications (AICCSA 11)/, [[https://hal.inria.fr/hal-00654193][First Online: 21 December 2011]].
+  * Regarding distributed memory:
+    - Agullo, Emmanuel and Aumage, Olivier and Faverge, Mathieu and
+      Furmento, Nathalie and Pruvost, Florent and Sergent, Marc and
+      Thibault, Samuel, *Achieving High Performance on Supercomputers
+      with a Sequential Task-based Programming Model*, /Research Report/,
+      [[https://hal.inria.fr/hal-01332774][First Online: 16 June 2016]].
+
+* Licence
+
+  [[file:LICENCE.txt][LICENCE]]

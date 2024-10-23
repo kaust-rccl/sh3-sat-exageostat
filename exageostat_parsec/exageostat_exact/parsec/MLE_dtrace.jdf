@@ -1,0 +1,150 @@
+extern "C" %{
+/*
+ * Copyright (c) 2017-2018 The Universiy of Tennessee and The Universiy
+ *                         of Tennessee Research Foundation. All rights
+ *                         reserved.
+ */
+
+#include "mix_precision_internal.h"
+
+static void parsec_core_dtrace( double *C11, double *Ztrace, double *S, int mb, int lda )
+{
+     *S = 0.0;
+     for (int i = 0; i < mb; i++) 
+     {
+         *S += C11[i + i * lda];
+         Ztrace[i] = C11[i + i * lda];
+     }
+}
+
+%}
+
+descC11                [ type = "parsec_tiled_matrix_dc_t *" ]
+descdet                [ type = "parsec_tiled_matrix_dc_t *" ]
+descZtrace             [ type = "parsec_tiled_matrix_dc_t *" ]
+
+Read_C11(m)
+
+m = 0 .. descC11->lmt-1
+
+: descC11(m, m)
+
+READ C11 <- descC11(m, m) 
+         -> C11 Get_trace(m)
+
+BODY
+{
+
+}
+END
+
+Get_trace(m)
+
+m = 0 .. descZtrace->lmt-1
+
+: descZtrace(m, 0)
+
+READ C11 <- C11 Read_C11(m) 
+
+RW Ztrace <- descZtrace(m, 0)
+          -> descZtrace(m, 0)
+
+WRITE S <- NEW
+        -> S Sum_trace(m) 
+
+BODY
+{
+	int tempmm = (m == descZtrace->lmt-1) ? parsec_imin(descZtrace->mb, descZtrace->m-m*descZtrace->mb): descZtrace->mb;
+	parsec_core_dtrace( (double *)C11, (double *)Ztrace, (double *)S, tempmm, descZtrace->mb );
+}
+END
+
+
+Sum_trace(m)
+
+m = 0 .. descZtrace->lmt-1
+
+: descdet(0, 0)
+
+READ S <- S Get_trace(m)
+
+RW D <- descdet(0, 0)
+     -> descdet(0, 0)
+
+CTL ctl1 -> (m != descZtrace->lmt-1)? ctl2 Sum_trace(m+1)
+CTL ctl2 <- (m != 0)? ctl1 Sum_trace(m-1)
+
+BODY
+{
+        /* Init data */
+        if( 0 == m ) {
+                *((double *)D) = 0.0;
+        }
+
+        /* Update */
+        *((double *)D) +=  *((double *)S);
+}
+END
+
+extern "C" %{
+
+/**
+ * @param [in] dcA:    the data, already distributed and allocated
+ * @return the parsec object to schedule.
+ */
+parsec_taskpool_t*
+parsec_MLE_dtrace_New(parsec_context_t *parsec,
+                      parsec_tiled_matrix_dc_t *dcC11,
+                      parsec_tiled_matrix_dc_t *dcdet,
+                      parsec_tiled_matrix_dc_t *dcZtrace)
+{
+    parsec_taskpool_t* MLE_dtrace_taskpool;
+    parsec_MLE_dtrace_taskpool_t* taskpool = NULL;
+
+    taskpool = parsec_MLE_dtrace_new(dcC11, dcdet, dcZtrace);
+    MLE_dtrace_taskpool = (parsec_taskpool_t*)taskpool;
+
+    parsec_matrix_add2arena(taskpool->arenas[PARSEC_MLE_dtrace_DEFAULT_ARENA],
+                            parsec_datatype_double_t, matrix_UpperLower,
+                            1, dcC11->mb, dcC11->nb, dcC11->mb,
+                            PARSEC_ARENA_ALIGNMENT_SSE, -1 );
+
+    return MLE_dtrace_taskpool;
+}
+
+/**
+ * @param [inout] the parsec object to destroy
+*/
+void parsec_MLE_dtrace_Destruct(parsec_taskpool_t *taskpool)
+{
+    parsec_MLE_dtrace_taskpool_t *tp = (parsec_MLE_dtrace_taskpool_t *)taskpool;
+    parsec_matrix_del2arena(tp->arenas[PARSEC_MLE_dtrace_DEFAULT_ARENA]);
+    parsec_taskpool_free(taskpool);
+}
+
+/**
+ * @brief allocate and generate dcA
+ * 
+ * @param [inout] dcA: the data, already distributed and allocated
+ */
+int parsec_MLE_dtrace(parsec_context_t *parsec,
+                      parsec_tiled_matrix_dc_t *dcC11,
+                      parsec_tiled_matrix_dc_t *dcdet,
+                      parsec_tiled_matrix_dc_t *dcZtrace)
+{
+    parsec_taskpool_t *parsec_MLE_dtrace = NULL;
+
+    parsec_MLE_dtrace = parsec_MLE_dtrace_New( 
+                               parsec, dcC11, dcdet, dcZtrace );
+
+    if( parsec_MLE_dtrace != NULL ){
+        parsec_context_add_taskpool(parsec, parsec_MLE_dtrace);
+        parsec_context_start(parsec);
+        parsec_context_wait(parsec);
+        parsec_MLE_dtrace_Destruct(parsec_MLE_dtrace);
+    }
+
+    return 0;
+}
+
+%}

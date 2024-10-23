@@ -1,0 +1,175 @@
+extern "C" %{
+/*
+ * Copyright (c) 2017-2018 The Universiy of Tennessee and The Universiy
+ *                         of Tennessee Research Foundation. All rights
+ *                         reserved.
+ */
+
+#include "mix_precision_internal.h"
+#include "include/dplasmajdf.h"
+#include "include/dplasmaaux.h"
+
+%}
+
+descA  [ type = "parsec_tiled_matrix_dc_t *" ]
+descB  [ type = "parsec_tiled_matrix_dc_t *" ]
+descC  [ type = "parsec_tiled_matrix_dc_t *" ]
+
+/** We need to keep the set of handle-globals the same between
+ *  dgemm_*.jdf, to ensure that all handles can be destroyed
+ *  with a generic function. P and Q are unused here. */
+P      [type = "int" hidden=on default="-1"]
+Q      [type = "int" hidden=on default="-1"]
+
+/* Look ahead on both dimensions */
+lookP  [type = "int" hidden=on default="dplasma_aux_getGEMMLookahead(descC)"]
+lookQ  [type = "int" hidden=on default="dplasma_aux_getGEMMLookahead(descC)"]
+
+
+READ_A(m, k)
+
+m = 0 .. descA->mt-1
+k = 0 .. m 
+
+: descA(m, k)
+
+READ A <- descA(m, k)                         [ type = FULL ]
+       -> A TRMV(m, 0 .. descC->nt-1, k)      [ type = FULL ]
+
+CTL ctla <- (k >= lookQ) ? ctla TRMV(m, 0 .. descC->nt-1, k-lookQ)
+
+BODY
+{
+    printlog("rank %u <- A(%d,%d)\n", ((parsec_data_collection_t*)descA)->myrank, m, k);
+}
+END
+
+
+READ_B(k, n)
+
+k = 0 .. descB->mt-1
+n = 0 .. 0 
+
+: descB(k, n)
+
+READ B <- descB(k, n)                      
+       -> B TRMV(k .. descC->mt-1, n, k)  
+
+CTL ctlb <- (k >= lookP) ? ctlb TRMV(0 .. descC->mt-1, n, k-lookP)
+
+BODY
+{
+     printlog("rank %u <- B(%d,%d)\n", ((parsec_data_collection_t*)descB)->myrank, k, n);
+}
+END
+
+TRMV(m, n, k)
+
+// Execution space
+m = 0 .. descC->mt-1
+n = 0 .. 0 
+k = 0 .. m 
+
+// Parallel partitioning
+: descC(m, n)
+
+// Parameters
+READ A <- A READ_A(m, k)            [ type = FULL ]
+READ B <- B READ_B(k, n)
+RW   C <- (k == 0)             ? descC(m, n) : C TRMV( m, n, k-1 )
+       -> (k == m) ? descC(m, n) : C TRMV( m, n, k+1 )
+
+READ B0 <- (k == m) ? NEW : NULL
+
+CTL ctla -> (k < (descA->nt-lookQ)) ? ctla READ_A(m, k+lookQ)
+CTL ctlb -> (k < (descA->nt-lookP)) ? ctlb READ_B(k+lookP, n)
+
+
+BODY
+{
+    double alpha = (double)1.0; 
+    double beta = (double)1.0; 
+    int tempmm = m == descC->mt-1 ? descC->m - m * descC->mb : descC->mb;
+    int tempkk = k == descA->nt-1 ? descA->n - k * descA->nb : descA->nb;
+
+    if( k == m ) {
+        memcpy( (void *)B0, (void *)B, sizeof(double) * tempmm );
+        cblas_dtrmv( CblasColMajor, CblasLower, CblasNoTrans, CblasNonUnit, 
+                    tempmm, A, descA->mb, B0, 1 );
+        for(int my_index = 0; my_index < tempmm; my_index++) 
+            ((double *)C)[my_index] += ((double *)B0)[my_index];
+    } else {
+        cblas_dgemv( CblasColMajor, CblasNoTrans, tempmm, tempkk, 
+                     alpha, A, descA->mb,
+                            B, 1,
+                     beta,  C, 1 );
+    }
+}
+END
+
+extern "C" %{
+
+/**
+ * @param [in] dcA:    the data, already distributed and allocated
+ * @return the parsec object to schedule.
+ */
+parsec_taskpool_t*
+parsec_my_dtrmv_New(parsec_tiled_matrix_dc_t *A,
+		parsec_tiled_matrix_dc_t *B,
+		parsec_tiled_matrix_dc_t *C) 
+{
+    parsec_my_dtrmv_taskpool_t* taskpool = NULL;
+ 
+    assert( A->mb == A->nb );
+
+    taskpool = parsec_my_dtrmv_new(A, B, C); 
+
+    parsec_matrix_add2arena(taskpool->arenas[PARSEC_my_dtrmv_DEFAULT_ARENA],
+                            parsec_datatype_double_t, matrix_UpperLower,
+                            1, A->mb, 1, A->mb,
+                            PARSEC_ARENA_ALIGNMENT_SSE, -1 );
+
+    parsec_matrix_add2arena(taskpool->arenas[PARSEC_my_dtrmv_FULL_ARENA],
+                            parsec_datatype_double_t, matrix_UpperLower,
+                            1, A->mb, A->nb, A->mb,
+                            PARSEC_ARENA_ALIGNMENT_SSE, -1 );
+
+    return (parsec_taskpool_t*)taskpool;
+}
+
+/**
+ * @param [inout] the parsec object to destroy
+*/
+void parsec_my_dtrmv_Destruct(parsec_taskpool_t *taskpool)
+{
+    parsec_my_dtrmv_taskpool_t *my_dtrmv_taskpool = (parsec_my_dtrmv_taskpool_t *)taskpool;
+    parsec_matrix_del2arena(my_dtrmv_taskpool->arenas[PARSEC_my_dtrmv_DEFAULT_ARENA]);
+    parsec_matrix_del2arena(my_dtrmv_taskpool->arenas[PARSEC_my_dtrmv_FULL_ARENA]);
+    parsec_taskpool_free(taskpool);
+}
+
+/**
+ * @brief allocate and generate dcA
+ * 
+ * @param [inout] dcA: the data, already distributed and allocated
+ */
+int parsec_my_dtrmv(parsec_context_t *parsec,
+                       parsec_tiled_matrix_dc_t *A,
+                       parsec_tiled_matrix_dc_t *B,
+		       parsec_tiled_matrix_dc_t *C)
+{
+    parsec_taskpool_t *parsec_my_dtrmv = NULL;
+
+    parsec_my_dtrmv = parsec_my_dtrmv_New(A, B, C); 
+
+    if( parsec_my_dtrmv != NULL ){
+        parsec_context_add_taskpool(parsec, parsec_my_dtrmv);
+        parsec_context_start(parsec);
+        parsec_context_wait(parsec);
+        parsec_my_dtrmv_Destruct(parsec_my_dtrmv);
+    }
+
+    return 0;
+}
+
+%}

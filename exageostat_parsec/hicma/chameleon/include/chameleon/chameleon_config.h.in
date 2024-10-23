@@ -1,0 +1,69 @@
+/**
+ *
+ * @file chameleon_config.h
+ *
+ * @copyright 2009-2014 The University of Tennessee and The University of
+ *                      Tennessee Research Foundation. All rights reserved.
+ * @copyright 2012-2017 Bordeaux INP, CNRS (LaBRI UMR 5800), Inria,
+ *                      Univ. Bordeaux. All rights reserved.
+ *
+ ***
+ *
+ * @brief Chameleon configuration file
+ *
+ * @version 1.0.0
+ * @author Florent Pruvost
+ * @date 2017-01-06
+ *
+ */
+#ifndef CHAMELEON_CONFIG_H_HAS_BEEN_INCLUDED
+#define CHAMELEON_CONFIG_H_HAS_BEEN_INCLUDED
+
+#define CHAMELEON_VERSION_MAJOR @CHAMELEON_VERSION_MAJOR@
+#define CHAMELEON_VERSION_MINOR @CHAMELEON_VERSION_MINOR@
+#define CHAMELEON_VERSION_MICRO @CHAMELEON_VERSION_MICRO@
+
+/* Scheduling engine */
+#cmakedefine CHAMELEON_SCHED_QUARK
+#cmakedefine CHAMELEON_SCHED_PARSEC
+#cmakedefine CHAMELEON_SCHED_STARPU
+
+/* Communication engine */
+#cmakedefine CHAMELEON_USE_MPI
+#cmakedefine CHAMELEON_USE_MIGRATE
+#if !defined(CHAMELEON_USE_MPI) && defined(CHAMELEON_USE_MIGRATE)
+#undef CHAMELEON_USE_MIGRATE
+#endif
+
+/* GPU Support */
+#cmakedefine CHAMELEON_USE_CUDA
+#cmakedefine CHAMELEON_USE_CUBLAS
+#cmakedefine CHAMELEON_USE_CUBLAS_V2
+
+/* Simulation */
+#cmakedefine CHAMELEON_SIMULATION
+
+/* Tracing support */
+#cmakedefine CHAMELEON_ENABLE_TRACING
+
+/* getopt */
+#cmakedefine CHAMELEON_HAVE_GETOPT_H
+#cmakedefine CHAMELEON_HAVE_GETOPT_LONG
+
+#ifdef BEGIN_C_DECLS
+#undef BEGIN_C_DECLS
+#endif
+
+#ifdef END_C_DECLS
+#undef END_C_DECLS
+#endif
+
+#if defined(c_plusplus) || defined(__cplusplus)
+# define BEGIN_C_DECLS extern "C" {
+# define END_C_DECLS }
+#else
+# define BEGIN_C_DECLS          /* empty */
+# define END_C_DECLS            /* empty */
+#endif
+
+#endif  /* CHAMELEON_CONFIG_H_HAS_BEEN_INCLUDED */

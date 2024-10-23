@@ -1,0 +1,145 @@
+extern "C" %{
+/*
+ * Copyright (c) 2017-2018 The Universiy of Tennessee and The Universiy
+ *                         of Tennessee Research Foundation. All rights
+ *                         reserved.
+ */
+
+#include "mix_precision_internal.h"
+
+static double parsec_matrix_avg_CORE (double *A, double *B, int mb, int nb, int lda, int m, int n) {
+        double res = 0.0;
+	int indicator = 0;
+	double min_value = A[0];
+	double max_value = A[0];
+	for (int j = 0; j < nb; j++) {
+		for (int i = 0; i < mb; i++) {
+			if( isnan(A[j*lda+i]) )
+				indicator = 1;
+				//fprintf(stderr, "NAN : ( %d %d ) in ( %d %d )\n", i, j, m, n);
+
+			res += A[j*lda+i]; 
+
+			if( min_value > A[j*lda+i] )
+				min_value = A[j*lda+i];
+
+			if( max_value < A[j*lda+i] )
+				max_value = A[j*lda+i];
+		}
+	}
+
+	if( 1 == indicator )
+		fprintf(stderr, "***** NAN ****** in ( %d %d )\n", m, n);
+
+	//*B = res;
+	//*B = res/mb/nb;
+	//*B = min_value; 
+	*B = max_value; 
+}
+
+%}
+
+descA            [ type = "parsec_tiled_matrix_dc_t *" ]
+descB            [ type = "parsec_tiled_matrix_dc_t *" aligned = descA ]
+
+Read(m, n)
+
+m = 0 .. descA->lmt-1
+n = 0 .. m 
+
+: descA(m, n)
+
+READ A <- descA(m, n)            [ type = DB ]
+
+RW B <- descB(m, n) 
+     -> descB(m, n)
+
+BODY
+{
+	int tempmm = (m == descA->lmt-1) ? parsec_imin(descA->mb, descA->m-m*descA->mb): descA->mb;
+	int tempnn = (n == descA->lnt-1) ? parsec_imin(descA->nb, descA->n-n*descA->nb): descA->nb;
+        parsec_matrix_avg_CORE( A, B, tempmm, tempnn, descA->mb, m, n );
+}
+END
+
+
+extern "C" %{
+
+/**
+ * @param [in] dcA:    the data, already distributed and allocated
+ * @return the parsec object to schedule.
+ */
+parsec_taskpool_t*
+parsec_dmatrix_avg_New(parsec_tiled_matrix_dc_t *dcA, parsec_tiled_matrix_dc_t *dcB) 
+{
+    parsec_taskpool_t* dmatrix_avg_taskpool;
+    parsec_dmatrix_avg_taskpool_t* taskpool = NULL;
+
+    taskpool = parsec_dmatrix_avg_new(dcA, dcB); 
+    dmatrix_avg_taskpool = (parsec_taskpool_t*)taskpool;
+
+    parsec_matrix_add2arena(taskpool->arenas[PARSEC_dmatrix_avg_DEFAULT_ARENA],
+                            parsec_datatype_double_t, matrix_UpperLower,
+                            1, 1, 1, 1,
+                            PARSEC_ARENA_ALIGNMENT_SSE, -1 );
+
+    parsec_matrix_add2arena(taskpool->arenas[PARSEC_dmatrix_avg_DB_ARENA],
+                            parsec_datatype_double_t, matrix_UpperLower,
+                            1, dcA->mb, dcA->nb, dcA->mb,
+                            PARSEC_ARENA_ALIGNMENT_SSE, -1 );
+
+    return dmatrix_avg_taskpool;
+}
+
+/**
+ * @param [inout] the parsec object to destroy
+*/
+void parsec_dmatrix_avg_Destruct(parsec_taskpool_t *taskpool)
+{
+    parsec_dmatrix_avg_taskpool_t *dmatrix_avg_taskpool = (parsec_dmatrix_avg_taskpool_t *)taskpool;
+    parsec_matrix_del2arena(dmatrix_avg_taskpool->arenas[PARSEC_dmatrix_avg_DB_ARENA]);
+    parsec_taskpool_free(taskpool);
+}
+
+/**
+ * @brief allocate and generate dcA
+ * 
+ * @param [inout] dcA: the data, already distributed and allocated
+ */
+void parsec_dmatrix_avg(parsec_context_t *parsec,
+                       parsec_tiled_matrix_dc_t *dcA)
+{
+	parsec_taskpool_t *parsec_dmatrix_avg = NULL;
+
+	assert( dcA->super.nodes == 1);
+
+	int NT = dcA->lm / dcA->mb;
+
+	two_dim_block_cyclic_t *dcB = (two_dim_block_cyclic_t *)malloc( sizeof(two_dim_block_cyclic_t) );
+	two_dim_block_cyclic_init(dcB, matrix_RealDouble, matrix_Tile,
+			dcA->super.nodes, dcA->super.myrank, 1, 1, NT, NT, 0, 0,
+			NT, NT, 1, 1, 1);
+	dcB->mat = calloc((size_t)dcB->super.nb_local_tiles *
+			(size_t)dcB->super.bsiz,
+			(size_t)parsec_datadist_getsizeoftype(dcB->super.mtype));
+	parsec_data_collection_set_key((parsec_data_collection_t*)dcB, "dcB");
+
+	parsec_dmatrix_avg = parsec_dmatrix_avg_New(dcA, (parsec_tiled_matrix_dc_t *)dcB); 
+
+	if( parsec_dmatrix_avg != NULL ){
+		parsec_context_add_taskpool(parsec, parsec_dmatrix_avg);
+		parsec_context_start(parsec);
+		parsec_context_wait(parsec);
+		parsec_dmatrix_avg_Destruct(parsec_dmatrix_avg);
+	}
+
+	fprintf(stderr, "Print average of each tile: \n");
+	for(int i = 0; i < NT; i++) {
+		for(int j = 0; j <= i; j++) {
+			fprintf(stderr, "%.4lf ", ((double *)dcB->mat)[j*NT+i]);
+		}
+		fprintf(stderr, "\n");
+	}
+}
+
+%}

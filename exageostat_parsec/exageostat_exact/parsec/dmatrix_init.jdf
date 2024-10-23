@@ -1,0 +1,96 @@
+extern "C" %{
+/*
+ * Copyright (c) 2017-2018 The Universiy of Tennessee and The Universiy
+ *                         of Tennessee Research Foundation. All rights
+ *                         reserved.
+ */
+
+#include "mix_precision_internal.h"
+
+static void init_value( double *A, double value, int mb, int nb ) {
+	for( int j = 0; j < nb; j++ )
+		for( int i = 0; i < mb; i++ )
+			A[j*mb+i] = value;
+}
+
+%}
+
+descA            [ type = "parsec_tiled_matrix_dc_t *" ]
+alpha            [ type = "double" ]
+beta             [ type = "double" ]
+
+Allocate(m, n)
+
+m = 0 .. descA->lmt-1
+n = 0 .. m
+
+: descA(m, n)
+
+RW A <- descA(m, n)
+     -> descA(m, n)
+
+BODY
+{
+	if( m == n )
+		init_value( A, beta, descA->mb, descA->nb );
+	else	
+		init_value( A, alpha, descA->mb, descA->nb );
+}
+END
+
+extern "C" %{
+
+/**
+ * @param [in] dcA:    the data, already distributed and allocated
+ * @return the parsec object to schedule.
+ */
+parsec_taskpool_t*
+parsec_dmatrix_init_New( parsec_tiled_matrix_dc_t *dcA, double alpha, double beta )
+{
+    parsec_taskpool_t* dmatrix_init_taskpool;
+    parsec_dmatrix_init_taskpool_t* taskpool = NULL;
+
+    taskpool = parsec_dmatrix_init_new( dcA, alpha, beta ); 
+    dmatrix_init_taskpool = (parsec_taskpool_t*)taskpool;
+
+    parsec_matrix_add2arena(taskpool->arenas[PARSEC_dmatrix_init_DEFAULT_ARENA],
+                            parsec_datatype_double_t, matrix_UpperLower,
+                            1, dcA->mb, dcA->nb, dcA->mb,
+                            PARSEC_ARENA_ALIGNMENT_SSE, -1 );
+
+    return dmatrix_init_taskpool;
+}
+
+/**
+ * @param [inout] the parsec object to destroy
+*/
+void parsec_dmatrix_init_Destruct(parsec_taskpool_t *taskpool)
+{
+    parsec_dmatrix_init_taskpool_t *dmatrix_init_taskpool = (parsec_dmatrix_init_taskpool_t *)taskpool;
+    parsec_matrix_del2arena(dmatrix_init_taskpool->arenas[PARSEC_dmatrix_init_DEFAULT_ARENA]);
+    parsec_taskpool_free(taskpool);
+}
+
+/**
+ * @brief allocate and generate dcA
+ * 
+ * @param [inout] dcA: the data, already distributed and allocated
+ */
+int parsec_dmatrix_init( parsec_context_t *parsec,
+                         parsec_tiled_matrix_dc_t *dcA, double alpha, double beta )
+{
+    parsec_taskpool_t *parsec_dmatrix_init = NULL;
+
+    parsec_dmatrix_init = parsec_dmatrix_init_New( dcA, alpha, beta ); 
+
+    if( parsec_dmatrix_init != NULL ){
+        parsec_context_add_taskpool(parsec, parsec_dmatrix_init);
+        parsec_context_start(parsec);
+        parsec_context_wait(parsec);
+        parsec_dmatrix_init_Destruct(parsec_dmatrix_init);
+    }
+
+    return 0;
+}
+
+%}

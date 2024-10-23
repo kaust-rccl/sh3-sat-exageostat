@@ -1,0 +1,3 @@
+parsec_addexample(C dtd_example_hello_world "dtd_example_hello_world.c")
+parsec_addexample(C dtd_example_hello_arg "dtd_example_hello_arg.c")
+parsec_addexample(C dtd_example_hello_world_untied "dtd_example_hello_world_untied.c")

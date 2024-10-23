@@ -1,0 +1,46 @@
+chameleon-1.0.0
+------------------------------------------------------------------------
+
+- MAGMA kernels are no longer supported in Chameleon
+- Add SVD/EVD drivers based on parallel first stage, and sequential LAPACK second stage and solve
+- Add First stage algorithm fo r the SVD/EVD solvers
+- add timing drivers time_zpotrs_tile and time_zgeqrs_tile
+- deactivate warmup by default
+- add an orgmode user guide documentation, see in doc/orgmode/
+
+chameleon-0.9.1
+------------------------------------------------------------------------
+r2253 | fpruvost | 2015-06-19 16:57:27 +0200 (ven. 19 juin 2015)
+
+- update users_guide
+- activate MAGMA kernels for simulation mode
+- magma_ztsqrt_gpu is now defined in magma-1.6.0: change the name of our magma routine in magma_ztsqrt2_gpu
+- avoid problem of compatibility with MAGMA with lapack_const
+- add cublas interface v2 (not used for now because starpu does not manage cublas handles)
+- use WORKC workspace for better performances in tsmqr
+- add lapacke headers
+- enable to use lapacke in lapack (MKL)
+- correct restrict zsytrf_nopiv
+- save config of build in config.log
+- improve potrf+potrs on distributed systems
+- add a MORSE_VERBOSE mode to activate or not hints during the detection
+- add the codelet name information in starpu_codelet for eztrace starpu module interceptions
+- change the name of the installed chameleon .pc file: no more starpu or quark suffix
+- change installation directories for headers, executables and docs. Make it relative to chameleon to avoid a bloody mess in system dirs
+- add an example to link with chameleon in cmake using FindCHAMELEON.cmake
+- update intern cmake Finds
+  - recursive cmake finds,
+  - add link tests
+  - MKLROOT env var. is considered
+  - env var. for libraries dir. are considered (ex: export HWLOC_DIR=/home/toto/install/hwloc)
+  - improve Find BLAS for gnu compilo and threaded mkl
+  - if hints are given by user to find libs (CMake option or env. var) --> do not use pkg-config
+- avoid to call MPI_Finalize if MPI has been initialized by user
+- add MORSE_Pause/Resume function to avoid CPU consumption when no tasks have to be executed
+- update the fortran90 interface
+
+chameleon-0.9.0
+------------------------------------------------------------------------
+r2019 | pruvost | 2014-11-16 18:43:03 +0100 (Sun, 16 Nov 2014)
+
+- First release of chameleon

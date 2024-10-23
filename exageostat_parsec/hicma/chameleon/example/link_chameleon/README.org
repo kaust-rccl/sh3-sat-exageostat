@@ -1,0 +1,35 @@
+#+TITLE: How to link with Chameleon
+#+LANGUAGE:  en
+#+OPTIONS: H:3 num:t \n:nil @:t ::t |:t _:nil ^:nil -:t f:t *:t <:t
+#+OPTIONS: TeX:t LaTeX:t skip:nil d:nil pri:nil tags:not-in-toc html-style:nil
+
+Install Chameleon and its dependencies
+#+begin_src
+# load an environment with dependencies available
+# for example
+spack install chameleon@master
+spack load openblas
+spack load hwloc
+spack load starpu
+spack load chameleon
+# alternativaly use pkg-config and/or update your CPATH and LD_LIBRARY_PATH
+# for example
+export PKG_CONFIG_PATH=/where/is/installed/chameleon/lib/pkgconfig:$PKG_CONFIG_PATH
+#+end_src
+
+Example to link with chameleon in CMake project, see the
+~CMakeLists.txt~ file
+#+begin_src
+mkdir build
+cd build
+cmake .. -DMORSE_DISTRIB_DIR=$PWD/../../../cmake_modules -DMORSE_CHAMELEON_USE_STARPU=ON
+make VERBOSE=1
+./link_chameleon_c
+./link_chameleon_f
+#+end_src
+
+Example using directly the pkg-config file
+#+begin_src
+gcc      `pkg-config --cflags chameleon` -o link_chameleon_c link_chameleon.c   `pkg-config --libs --static chameleon`
+gfortran `pkg-config --cflags chameleon` -o link_chameleon_f link_chameleon.f90 `pkg-config --libs --static chameleon`
+#+end_src
