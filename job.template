@@ -2,6 +2,8 @@
 
 ## Bilel asked to test this variable
 # export FI_MR_CACHE_MONITOR=disabled
+# export FI_MR_CACHE_MONITOR=kdreg2
+
 
 function pxq {
   nodes=$1
@@ -29,6 +31,8 @@ PPN=__NTASKS_PER_NODE__
 NTASKS=__NTASKS__
 CPUS_PER_TASK=__CPUS_PER_TASK__
 depop=__DEPOP__
+
+echo $SLURM_NODELIST
 
 # 2. Application's run once
 mkdir -p runs/${SLURM_JOB_ID} && cd runs/${SLURM_JOB_ID}

@@ -25,5 +25,7 @@ for j in $(seq 0 $num_tests);do
   n1=${nodes[$i]}
   ppn=${ntasks_per_node[$i]}
   ((mpi=n1*ppn))
-  sbatch --reservation=maintenance.2024-10 --job-name ExaGeoStat --time 12:00:00 --nodes ${nodes[$i]} --ntasks $mpi --ntasks-per-node ${ntasks_per_node[$i]} --cpus-per-task ${cpus_per_task[$i]} --hint=multithread job.slurm
+  sbatch \
+      $MY_SLURM_OPTIONS \
+      --job-name ExaGeoStat --time 12:00:00 --nodes ${nodes[$i]} --ntasks $mpi --ntasks-per-node ${ntasks_per_node[$i]} --cpus-per-task ${cpus_per_task[$i]} --hint=multithread job.slurm
 done
